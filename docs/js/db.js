@@ -1,0 +1,86 @@
+// IndexedDB com migrações versionadas. Para mudar o formato: aumente DB_VERSION e
+// acrescente MIGRATIONS[n]. Migrações só ADICIONAM/transformam; nunca apagam dados do usuário.
+export const DB_NAME = 'gastos-viagem';
+export const DB_VERSION = 1;
+
+const MIGRATIONS = {
+  1(db) {
+    db.createObjectStore('meta', { keyPath: 'key' });
+    db.createObjectStore('entries', { keyPath: 'id' }).createIndex('date', 'date');
+    db.createObjectStore('expenses', { keyPath: 'id' }).createIndex('date', 'date');
+  },
+  // 2(db, tx) { ... }  // Fase 2: store 'activities'
+};
+
+let dbPromise = null;
+
+export function openDB() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        for (let v = e.oldVersion + 1; v <= e.newVersion; v++) MIGRATIONS[v](req.result, req.transaction);
+      };
+      req.onsuccess = () => {
+        const d = req.result;
+        d.onversionchange = () => d.close();
+        resolve(d);
+      };
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error('Banco bloqueado por outra aba/janela do app.'));
+    }).catch((err) => { dbPromise = null; throw err; });
+  }
+  return dbPromise;
+}
+
+async function write(stores, fn) {
+  const d = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(stores, 'readwrite');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Transação cancelada.'));
+    fn(tx);
+  });
+}
+
+export async function loadAll() {
+  const d = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(['meta', 'entries', 'expenses'], 'readonly');
+    const r = {};
+    for (const s of ['meta', 'entries', 'expenses']) {
+      tx.objectStore(s).getAll().onsuccess = (e) => { r[s] = e.target.result; };
+    }
+    tx.oncomplete = () => {
+      const m = Object.fromEntries(r.meta.map((x) => [x.key, x.value]));
+      resolve({ trip: m.trip ?? null, people: m.people ?? [], entries: r.entries, expenses: r.expenses });
+    };
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Leitura cancelada.'));
+  });
+}
+
+export const saveTrip = (trip, people) => write(['meta'], (tx) => {
+  const s = tx.objectStore('meta');
+  s.put({ key: 'trip', value: trip });
+  s.put({ key: 'people', value: people });
+});
+
+export const putEntry = (e) => write(['entries'], (tx) => tx.objectStore('entries').put(e));
+export const deleteEntry = (id) => write(['entries'], (tx) => tx.objectStore('entries').delete(id));
+export const putExpense = (x) => write(['expenses'], (tx) => tx.objectStore('expenses').put(x));
+export const deleteExpense = (id) => write(['expenses'], (tx) => tx.objectStore('expenses').delete(id));
+
+/** Substitui TUDO numa única transação: se algo falhar, nada muda. */
+export const replaceAll = ({ trip, people, entries, expenses }) =>
+  write(['meta', 'entries', 'expenses'], (tx) => {
+    const meta = tx.objectStore('meta');
+    const en = tx.objectStore('entries');
+    const ex = tx.objectStore('expenses');
+    meta.clear(); en.clear(); ex.clear();
+    meta.put({ key: 'trip', value: trip });
+    meta.put({ key: 'people', value: people });
+    entries.forEach((e) => en.put(e));
+    expenses.forEach((x) => ex.put(x));
+  });
