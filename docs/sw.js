@@ -1,6 +1,6 @@
 // Service worker: app shell em cache (funciona offline). Dados ficam no IndexedDB e nunca são tocados aqui.
 // A cada nova versão do app: aumente VERSION aqui e em js/version.js.
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const CACHE = `gastos-viagem-${VERSION}`;
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',

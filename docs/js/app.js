@@ -320,7 +320,7 @@ function renderCronograma() {
       <div class="kv"><span>Total estimado</span><b>${range(p.estMin, p.estMax)}</b></div></div>`).join('')}
     <p class="hint">Por pessoa, o cálculo usa a parte de cada participante e o que ela mesma consumiu nos gastos vinculados. Por isso a soma das pessoas pode diferir do total da atividade quando o gasto real foi dividido diferente da previsão.</p></div>`);
 
-  parts.push('<button class="btn primary" data-act="new-activity" style="margin-top:0">+ Nova atividade</button><button class="btn" data-act="import-schedule">Importar cronograma (.json)</button>');
+  parts.push('<button class="btn primary" data-act="new-activity" style="margin-top:0">+ Nova atividade</button><button class="btn" data-act="import-schedule">Importar cronograma (.json)</button><button class="btn" data-act="paste-schedule">Colar cronograma (texto)</button>');
 
   const visible = F.days.filter((d) => d.future || d.activities.length || d.realSpent > 0);
   parts.push(visible.map((d) => {
@@ -361,7 +361,29 @@ async function setActivityStatus(id, status) {
 async function handleScheduleFile(file) {
   if (!file) return;
   if (file.size > 1024 * 1024) { await confirmDialog({ title: 'Arquivo grande demais', message: 'O cronograma deve ter menos de 1 MB.', okLabel: 'Ok' }); return; }
-  const r = parseScheduleImport(await file.text(), { people: S.people, existing: S.activities, uid, now: new Date() });
+  await importScheduleText(await file.text());
+}
+
+function openPasteSheet() {
+  const body = openSheet('Colar cronograma', `<form id="pasteForm" novalidate>
+    <p class="hint">Cole aqui o texto do cronograma (começa com {"app":"gastos-viagem"...). Nada é salvo antes de você confirmar.</p>
+    <textarea id="pText" rows="10" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder='{"app":"gastos-viagem","kind":"cronograma",...}'></textarea>
+    <div id="pErr" class="error" role="alert" hidden></div>
+    <button class="btn primary" type="submit">Continuar</button></form>`);
+  body.querySelector('form').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const text = $('pText').value.trim();
+    if (!text) { showErrors($('pErr'), ['Cole o texto do cronograma.']); return; }
+    if (text.length > 1024 * 1024) { showErrors($('pErr'), ['O texto deve ter menos de 1 MB.']); return; }
+    const r = parseScheduleImport(text, { people: S.people, existing: [], uid, now: new Date() });
+    if (!r.ok) { showErrors($('pErr'), r.errors); return; }
+    closeSheet();
+    await importScheduleText(text);
+  };
+}
+
+async function importScheduleText(text) {
+  const r = parseScheduleImport(text, { people: S.people, existing: S.activities, uid, now: new Date() });
   if (!r.ok) {
     await confirmDialog({ title: 'Cronograma inválido', message: `Nada foi alterado.<ul>${r.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`, okLabel: 'Entendi' });
     return;
@@ -817,6 +839,7 @@ document.addEventListener('click', (ev) => {
   else if (act === 'edit-entry') openEntrySheet(el.dataset.id);
   else if (act === 'new-activity') openActivitySheet(null);
   else if (act === 'import-schedule') { $('schedPicker').value = ''; $('schedPicker').click(); }
+  else if (act === 'paste-schedule') openPasteSheet();
   else if (act === 'set-status') setActivityStatus(el.dataset.id, el.dataset.status);
   else if (act === 'add-activity') openActivitySheet(null, el.dataset.date);
   else if (act === 'edit-activity') openActivitySheet(el.dataset.id);

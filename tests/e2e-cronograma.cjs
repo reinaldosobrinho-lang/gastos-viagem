@@ -108,7 +108,16 @@ const norm = (s) => s.replace(/\s/g, ' ');
   await page.fill('#aMin', '20'); await page.fill('#aMax', '60'); await page.click('#actForm button[type=submit]'); await closed();
   assert.match(await text(), /Previsto US\$ 20,00 a US\$ 60,00/);
 
-  // reproduzir (animação) não quebra e termina
+  // colar texto: inválido mostra erro dentro do formulário; válido importa
+  await page.click('[data-act=paste-schedule]');
+  await page.fill('#pText', '{ não é json'); await page.click('#pasteForm button[type=submit]');
+  assert.match(await page.locator('#pErr').innerText(), /JSON válido/);
+  await page.fill('#pText', JSON.stringify({ app: 'gastos-viagem', kind: 'cronograma', schema: 1, activities: [{ date: addDays(1), title: 'Colado Zeta' }] }));
+  await page.click('#pasteForm button[type=submit]'); await page.waitForSelector('.dlg');
+  assert.match(norm(await page.locator('.dlg').innerText()), /1 atividade/); await page.click('[data-ok]');
+  await page.waitForFunction(() => /Colado Zeta/.test(document.querySelector('#app').innerText));
+
+
   await page.click('[data-act=tl-play]'); await page.waitForTimeout(500);
   assert.ok(await page.locator('#tlScroll.tl-anim').count() === 1);
   await shot('c2-reproduzir');
@@ -121,7 +130,7 @@ const norm = (s) => s.replace(/\s/g, ' ');
   const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-act=export]')]);
   const bf = path.join(os.tmpdir(), 'bk3.json'); await dl.saveAs(bf);
   const bk = JSON.parse(fs.readFileSync(bf, 'utf8'));
-  assert.equal(bk.activities.length, 6);
+  assert.equal(bk.activities.length, 7);
   assert.ok(bk.activities.some((a) => a.icon === '🎭' && a.notes === 'obs <b>x</b>'));
   assert.ok(bk.activities.some((a) => a.min === null && a.max === null));
   await page.emulateMedia({ colorScheme: 'dark' }); await page.click('[data-tab=crono]'); await page.waitForSelector('#tlCard svg'); await shot('c3-dark');
