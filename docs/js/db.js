@@ -1,7 +1,7 @@
 // IndexedDB com migrações versionadas. Para mudar o formato: aumente DB_VERSION e
 // acrescente MIGRATIONS[n]. Migrações só ADICIONAM/transformam; nunca apagam dados do usuário.
 export const DB_NAME = 'gastos-viagem';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 const MIGRATIONS = {
   1(db) {
@@ -9,7 +9,9 @@ const MIGRATIONS = {
     db.createObjectStore('entries', { keyPath: 'id' }).createIndex('date', 'date');
     db.createObjectStore('expenses', { keyPath: 'id' }).createIndex('date', 'date');
   },
-  // 2(db, tx) { ... }  // Fase 2: store 'activities'
+  2(db) { // Fase 2: cronograma. Só ADICIONA um store; gastos e entradas continuam como estão.
+    db.createObjectStore('activities', { keyPath: 'id' }).createIndex('date', 'date');
+  },
 };
 
 let dbPromise = null;
@@ -47,14 +49,14 @@ async function write(stores, fn) {
 export async function loadAll() {
   const d = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = d.transaction(['meta', 'entries', 'expenses'], 'readonly');
+    const tx = d.transaction(['meta', 'entries', 'expenses', 'activities'], 'readonly');
     const r = {};
-    for (const s of ['meta', 'entries', 'expenses']) {
+    for (const s of ['meta', 'entries', 'expenses', 'activities']) {
       tx.objectStore(s).getAll().onsuccess = (e) => { r[s] = e.target.result; };
     }
     tx.oncomplete = () => {
       const m = Object.fromEntries(r.meta.map((x) => [x.key, x.value]));
-      resolve({ trip: m.trip ?? null, people: m.people ?? [], entries: r.entries, expenses: r.expenses });
+      resolve({ trip: m.trip ?? null, people: m.people ?? [], entries: r.entries, expenses: r.expenses, activities: r.activities });
     };
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Leitura cancelada.'));
@@ -72,15 +74,25 @@ export const deleteEntry = (id) => write(['entries'], (tx) => tx.objectStore('en
 export const putExpense = (x) => write(['expenses'], (tx) => tx.objectStore('expenses').put(x));
 export const deleteExpense = (id) => write(['expenses'], (tx) => tx.objectStore('expenses').delete(id));
 
+export const putActivity = (a) => write(['activities'], (tx) => tx.objectStore('activities').put(a));
+/** Exclui a atividade e, na mesma transação, remove o vínculo dos gastos (que continuam lançados). */
+export const deleteActivity = (id, unlinkedExpenses) => write(['activities', 'expenses'], (tx) => {
+  tx.objectStore('activities').delete(id);
+  const ex = tx.objectStore('expenses');
+  unlinkedExpenses.forEach((x) => ex.put(x));
+});
+
 /** Substitui TUDO numa única transação: se algo falhar, nada muda. */
-export const replaceAll = ({ trip, people, entries, expenses }) =>
-  write(['meta', 'entries', 'expenses'], (tx) => {
+export const replaceAll = ({ trip, people, entries, expenses, activities }) =>
+  write(['meta', 'entries', 'expenses', 'activities'], (tx) => {
     const meta = tx.objectStore('meta');
     const en = tx.objectStore('entries');
     const ex = tx.objectStore('expenses');
-    meta.clear(); en.clear(); ex.clear();
+    const ac = tx.objectStore('activities');
+    meta.clear(); en.clear(); ex.clear(); ac.clear();
     meta.put({ key: 'trip', value: trip });
     meta.put({ key: 'people', value: people });
     entries.forEach((e) => en.put(e));
     expenses.forEach((x) => ex.put(x));
+    activities.forEach((a) => ac.put(a));
   });

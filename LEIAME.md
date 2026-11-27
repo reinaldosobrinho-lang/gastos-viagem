@@ -28,4 +28,5 @@ Ajustes → **Exportar backup**: salve o `.json` em Arquivos/iCloud. Restaurar v
 
 ## Testes (no computador)
 - `npm test` — cálculos, divisões, datas, backup e consistência do PWA.
-- `NODE_PATH=$(npm root -g) node tests/e2e-smoke.cjs` — fluxo completo no Chromium (precisa do Playwright).
+- `NODE_PATH=$(npm root -g) node tests/e2e-smoke.cjs` — fluxo da Fase 1 no Chromium (precisa do Playwright).
+- `NODE_PATH=$(npm root -g) node tests/e2e-fase2.cjs` — Fase 2 e atualização da v1 para a v2 com dados gravados.

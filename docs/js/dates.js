@@ -27,6 +27,13 @@ export function dayNumber(str) {
 /** Dias entre a e b (a - b). */
 export const diffDays = (a, b) => dayNumber(a) - dayNumber(b);
 
+/** Soma n dias a uma data "AAAA-MM-DD" (aritmética de calendário, sem fuso). */
+export function addDays(str, n) {
+  const [y, m, d] = str.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
+}
+
 export function formatDateBR(str) {
   const [y, m, d] = str.split('-');
   return `${d}/${m}/${y}`;

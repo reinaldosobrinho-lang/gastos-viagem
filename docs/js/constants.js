@@ -16,5 +16,9 @@ export const CATEGORIES = [
 
 export const categoryLabel = (id) => CATEGORIES.find((c) => c.id === id)?.label ?? 'Outros';
 
+export const ACTIVITY_STATUS = [
+  ['planned', 'Planejada'], ['done', 'Concluída'], ['cancelled', 'Cancelada'],
+].map(([id, label]) => ({ id, label }));
+
 export const PERSON_IDS = ['p1', 'p2', 'p3'];
 export const MAX_TRIP_DAYS = 400;

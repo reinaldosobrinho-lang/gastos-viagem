@@ -10,6 +10,42 @@ export function splitEqual(total, personIds) {
   return personIds.map((personId, i) => ({ personId, cents: base + (i < rem ? 1 : 0) }));
 }
 
+const isMoney0 = (v) => Number.isSafeInteger(v) && v >= 0;
+
+/**
+ * Divide a previsão (mínimo e máximo) de uma atividade entre os participantes.
+ * mode: 'equal' | 'custom'; custom: { id: { min, max } } em centavos (ou null se vazio).
+ * Retorna { ok:true, shares:[{personId,min,max}] } ou { ok:false, code, personId?, diff? }.
+ * Códigos: no_participant, bad_values, min_gt_max, bad_mode, missing_value,
+ * person_min_gt_max, sum_min_mismatch, sum_max_mismatch.
+ */
+export function buildShares({ mode, min, max, order, selected, custom = {} }) {
+  const ids = order.filter((id) => selected.has(id));
+  if (ids.length === 0) return { ok: false, code: 'no_participant' };
+  if (!isMoney0(min) || !isMoney0(max)) return { ok: false, code: 'bad_values' };
+  if (min > max) return { ok: false, code: 'min_gt_max' };
+
+  if (mode === 'equal') {
+    const a = splitEqual(min, ids);
+    const b = splitEqual(max, ids);
+    return { ok: true, shares: ids.map((personId, i) => ({ personId, min: a[i].cents, max: b[i].cents })) };
+  }
+  if (mode !== 'custom') return { ok: false, code: 'bad_mode' };
+
+  const shares = [];
+  for (const id of ids) {
+    const v = custom[id];
+    if (!v || !isMoney0(v.min) || !isMoney0(v.max)) return { ok: false, code: 'missing_value', personId: id };
+    if (v.min > v.max) return { ok: false, code: 'person_min_gt_max', personId: id };
+    shares.push({ personId: id, min: v.min, max: v.max });
+  }
+  const sMin = sum(shares.map((s) => s.min));
+  const sMax = sum(shares.map((s) => s.max));
+  if (sMin !== min) return { ok: false, code: 'sum_min_mismatch', diff: min - sMin };
+  if (sMax !== max) return { ok: false, code: 'sum_max_mismatch', diff: max - sMax };
+  return { ok: true, shares };
+}
+
 /**
  * Monta as partes de um gasto.
  * mode: 'equal' | 'custom'; order: ids na ordem canônica; selected: Set de ids;

@@ -1,9 +1,10 @@
 // Interface do app. A lógica (dinheiro, datas, divisão, painel, backup) fica nos outros módulos.
 import { APP_VERSION } from './version.js';
-import { CURRENCIES, CATEGORIES, categoryLabel, PERSON_IDS } from './constants.js';
+import { CURRENCIES, CATEGORIES, ACTIVITY_STATUS, categoryLabel, PERSON_IDS } from './constants.js';
 import { parseMoney, formatMoney, formatPlain } from './money.js';
 import { todayLocal, localTimestamp, diffDays, formatDateBR, formatDateLong } from './dates.js';
-import { splitEqual, buildConsumers } from './split.js';
+import { splitEqual, buildConsumers, buildShares } from './split.js';
+import { computeForecast } from './forecast.js';
 import { dashboard } from './calc.js';
 import { buildBackup, validateBackup } from './backup.js';
 import { validateTrip, validatePeopleNames } from './trip.js';
@@ -13,10 +14,12 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
 
-let S = { trip: null, people: [], entries: [], expenses: [] };
+let S = { trip: null, people: [], entries: [], expenses: [], activities: [] };
 let view = 'painel';
 const fmt = (c) => formatMoney(c, S.trip.currency);
-const hasData = () => S.entries.length > 0 || S.expenses.length > 0;
+const hasData = () => S.entries.length > 0 || S.expenses.length > 0 || S.activities.length > 0;
+const STATUS_LABEL = Object.fromEntries(ACTIVITY_STATUS.map((x) => [x.id, x.label]));
+const activityTitle = (id) => S.activities.find((a) => a.id === id)?.title ?? '';
 
 /* ---------- utilitários de UI ---------- */
 let toastTimer;
@@ -71,10 +74,10 @@ function render() {
   const tabs = $('tabs');
   if (!S.trip) { tabs.hidden = true; $('title').textContent = 'Nova viagem'; renderSetup(); return; }
   tabs.hidden = false;
-  const items = [['painel', '📊', 'Painel'], ['gastos', '🧾', 'Gastos'], ['saldo', '💰', 'Saldo'], ['ajustes', '⚙️', 'Ajustes']];
+  const items = [['painel', '📊', 'Painel'], ['gastos', '🧾', 'Gastos'], ['crono', '🗓️', 'Cronograma'], ['saldo', '💰', 'Saldo'], ['ajustes', '⚙️', 'Ajustes']];
   tabs.innerHTML = items.map(([id, ic, lb]) => `<button data-tab="${id}" ${view === id ? 'aria-current="page"' : ''}><span aria-hidden="true">${ic}</span>${lb}</button>`).join('');
-  $('title').textContent = { painel: S.trip.name, gastos: 'Gastos', saldo: 'Saldo do caixa', ajustes: 'Ajustes' }[view];
-  ({ painel: renderPainel, gastos: renderGastos, saldo: renderSaldo, ajustes: renderAjustes })[view]();
+  $('title').textContent = { painel: S.trip.name, gastos: 'Gastos', crono: 'Cronograma', saldo: 'Saldo do caixa', ajustes: 'Ajustes' }[view];
+  ({ painel: renderPainel, gastos: renderGastos, crono: renderCronograma, saldo: renderSaldo, ajustes: renderAjustes })[view]();
 }
 
 /* ---------- Painel ---------- */
@@ -103,6 +106,16 @@ function renderPainel() {
   const limitCls = D.dailyLimit !== null && D.dailyLimit < 0 ? 'neg' : '';
   const restCls = D.remainingToday !== null && D.remainingToday < 0 ? 'neg' : '';
   const maxP = Math.max(1, ...D.perPerson.map((p) => p.cents));
+  let forecastCard = '';
+  if (S.activities.length) {
+    const F = getForecast();
+    alerts.push(...forecastAlerts(F));
+    forecastCard = `<div class="card"><h2>Previsão da viagem</h2>
+      <div class="kv"><span>Previsão restante</span><b>${range(F.trip.remMin, F.trip.remMax)}</b></div>
+      <div class="kv"><span>Saldo projetado (mínimo)</span><b class="${F.trip.projMin < 0 ? 'neg' : ''}">${fmt(F.trip.projMin)}</b></div>
+      <div class="kv"><span>Saldo projetado (máximo)</span><b class="${F.trip.projMax < 0 ? 'neg' : ''}">${fmt(F.trip.projMax)}</b></div>
+      <button class="btn" data-act="goto" data-view="crono">Ver cronograma</button></div>`;
+  }
   $('app').innerHTML = `${alerts.join('')}${status}
     <div class="card hero"><div class="label">Saldo disponível</div><div class="value ${D.balance < 0 ? 'neg' : ''}">${fmt(D.balance)}</div>
       <div class="hint">Entradas ${fmt(D.totalIn)} − gastos ${fmt(D.totalSpent)}</div></div>
@@ -118,6 +131,7 @@ function renderPainel() {
       ${D.perPerson.map((p) => `<div class="row" style="display:block"><div style="display:flex;justify-content:space-between"><span>${esc(p.name)}</span><strong>${fmt(p.cents)}</strong></div>
         <div class="bar"><i style="width:${Math.round((p.cents / maxP) * 100)}%"></i></div></div>`).join('')}
       <p class="hint">Soma das partes de cada gasto atribuídas à pessoa.</p></div>
+    ${forecastCard}
     <button class="btn primary" data-act="new-expense">+ Novo gasto</button>`;
 }
 
@@ -140,7 +154,7 @@ function renderGastos() {
   const groups = groupByDate(S.expenses);
   const body = [...groups.entries()].map(([d, list]) => `<div class="list-group"><h3><span>${esc(dayLabel(d))}</span><span>${fmt(list.reduce((a, x) => a + x.cents, 0))}</span></h3>
     ${list.map((x) => `<button class="item" data-act="edit-expense" data-id="${esc(x.id)}"><div><div class="t">${esc(x.store || categoryLabel(x.category))}</div>
-      <div class="s">${esc(categoryLabel(x.category))}${x.description ? ' · ' + esc(x.description) : ''}</div><div class="s">${esc(consumersLabel(x))}</div></div>
+      <div class="s">${esc(categoryLabel(x.category))}${x.description ? ' · ' + esc(x.description) : ''}</div><div class="s">${esc(consumersLabel(x))}</div>${x.activityId && activityTitle(x.activityId) ? `<div class="s">🗓️ ${esc(activityTitle(x.activityId))}</div>` : ''}</div>
       <div class="amt">${fmt(x.cents)}</div></button>`).join('')}</div>`).join('');
   $('app').innerHTML = `<button class="btn primary" data-act="new-expense" style="margin-top:0">+ Novo gasto</button>
     ${body || '<p class="muted center" style="margin-top:32px">Nenhum gasto lançado ainda.</p>'}`;
@@ -157,6 +171,225 @@ function renderSaldo() {
       <div class="hint">Entradas ${fmt(D.totalIn)} − gastos ${fmt(D.totalSpent)}</div></div>
     <button class="btn primary" data-act="new-entry" style="margin-top:0">+ Nova entrada de saldo</button>
     ${body || '<p class="muted center" style="margin-top:32px">Nenhuma entrada lançada ainda.</p>'}`;
+}
+
+/* ---------- Cronograma e previsão ---------- */
+const range = (a, b) => (a === b ? fmt(a) : `${fmt(a)} a ${fmt(b)}`);
+
+function getForecast() {
+  const D = dashboard({ trip: S.trip, people: S.people, entries: S.entries, expenses: S.expenses, today: todayLocal() });
+  return computeForecast({ trip: S.trip, people: S.people, activities: S.activities, expenses: S.expenses, today: todayLocal(), balance: D.balance });
+}
+
+function forecastAlerts(F) {
+  const out = [];
+  if (F.alerts.includes('min_not_covered')) {
+    out.push(`<div class="alert danger" role="alert"><strong>O saldo não cobre nem o cenário mínimo.</strong> Saldo ${fmt(F.trip.balance)} para uma previsão restante de, no mínimo, ${fmt(F.trip.remMin)}: faltam ${fmt(-F.trip.projMin)}.</div>`);
+  } else if (F.alerts.includes('max_not_covered')) {
+    out.push(`<div class="alert warn" role="alert"><strong>O saldo cobre o mínimo, mas não o máximo.</strong> Se as atividades custarem o máximo, faltam ${fmt(-F.trip.projMax)}.</div>`);
+  }
+  return out;
+}
+
+const projCls = (v) => (v !== null && v < 0 ? 'neg' : '');
+
+function renderCronograma() {
+  const F = getForecast();
+  const today = todayLocal();
+  const t = F.trip;
+  const parts = [];
+  parts.push(...forecastAlerts(F));
+  if (F.overdue.length) {
+    parts.push(`<div class="alert warn"><strong>${F.overdue.length} atividade${F.overdue.length === 1 ? '' : 's'} de dia passado ainda pendente${F.overdue.length === 1 ? '' : 's'}.</strong> Marque como concluída ou cancelada para tirar da previsão:
+      ${F.overdue.map((id) => { const a = S.activities.find((x) => x.id === id); return `<button class="link" data-act="edit-activity" data-id="${esc(id)}">${esc(a.title)} (${formatDateBR(a.date)})</button>`; }).join(' · ')}</div>`);
+  }
+  if (F.overspent.length) {
+    parts.push(`<div class="alert info">Já foi gasto mais que o máximo previsto em: ${F.overspent.map((id) => esc(activityTitle(id))).join(', ')}. Considere revisar a previsão.</div>`);
+  }
+  if (F.noForecastDays.length) {
+    const shown = F.noForecastDays.slice(0, 5).map(formatDateBR).join(', ');
+    parts.push(`<div class="alert info"><strong>${F.noForecastDays.length} dia${F.noForecastDays.length === 1 ? '' : 's'} sem previsão</strong> (${shown}${F.noForecastDays.length > 5 ? '…' : ''}). Lembre de incluir refeições e transporte.</div>`);
+  }
+  parts.push(`<div class="card"><h2>Viagem toda</h2>
+    <div class="kv"><span>Saldo atual</span><b class="${projCls(t.balance)}">${fmt(t.balance)}</b></div>
+    <div class="kv"><span>Gasto real</span><b>${fmt(t.real)}</b></div>
+    <div class="kv"><span>Previsão restante (mín. a máx.)</span><b>${range(t.remMin, t.remMax)}</b></div>
+    <div class="kv"><span>Total estimado (real + restante)</span><b>${range(t.estMin, t.estMax)}</b></div>
+    <div class="kv"><span>Saldo projetado · cenário mínimo</span><b class="${projCls(t.projMin)}">${fmt(t.projMin)}</b></div>
+    <div class="kv"><span>Saldo projetado · cenário máximo</span><b class="${projCls(t.projMax)}">${fmt(t.projMax)}</b></div>
+    <p class="hint">A previsão restante já desconta o que foi gasto e vinculado à atividade (nada é contado duas vezes). Lembre de incluir refeições e transporte.</p></div>`);
+
+  parts.push(`<div class="card"><h2>Por pessoa</h2>${F.persons.map((p) => `<div class="person">
+      <div class="kv"><strong>${esc(p.name)}</strong><span></span></div>
+      <div class="kv"><span>Já consumido</span><b>${fmt(p.consumed)}</b></div>
+      <div class="kv"><span>Ainda previsto</span><b>${range(p.remMin, p.remMax)}</b></div>
+      <div class="kv"><span>Total estimado</span><b>${range(p.estMin, p.estMax)}</b></div></div>`).join('')}
+    <p class="hint">Por pessoa, o cálculo usa a parte de cada participante e o que ela mesma consumiu nos gastos vinculados. Por isso a soma das pessoas pode diferir do total da atividade quando o gasto real foi dividido diferente da previsão.</p></div>`);
+
+  parts.push('<button class="btn primary" data-act="new-activity" style="margin-top:0">+ Nova atividade</button>');
+
+  const visible = F.days.filter((d) => d.future || d.activities.length || d.realSpent > 0);
+  parts.push(visible.map((d) => {
+    const label = d.date === today ? `Hoje · ${formatDateBR(d.date)}` : `${formatDateLong(d.date)} · ${formatDateBR(d.date)}`;
+    const items = d.activities.map((id) => {
+      const a = S.activities.find((x) => x.id === id);
+      const r = F.perActivity[id];
+      const who = a.participants.length === S.people.length ? 'Todos' : a.participants.map((pid) => S.people.find((p) => p.id === pid)?.name ?? '?').join(', ');
+      return `<button class="item" data-act="edit-activity" data-id="${esc(id)}"><div>
+        <div class="t">${esc(a.title)}</div>
+        <div class="s"><span class="badge ${a.status}">${esc(STATUS_LABEL[a.status])}</span> ${esc(who)}</div>
+        <div class="s">Previsto ${range(a.min, a.max)}${r.spent ? ` · gasto ${fmt(r.spent)}` : ''}${a.status === 'planned' ? ` · resta ${range(r.remMin, r.remMax)}` : ''}</div></div></button>`;
+    }).join('');
+    return `<div class="card day ${d.future ? '' : 'past'}"><h3>${esc(label)}</h3>
+      ${d.outOfRange ? '<p class="hint neg">Fora do período da viagem.</p>' : ''}
+      <div class="kv"><span>Gasto real</span><b>${fmt(d.realSpent)}</b></div>
+      ${d.future ? `<div class="kv"><span>Previsão restante</span><b>${range(d.remMin, d.remMax)}</b></div>
+        <div class="kv"><span>Saldo projetado (mín. / máx.)</span><b><span class="${projCls(d.projMin)}">${fmt(d.projMin)}</span> / <span class="${projCls(d.projMax)}">${fmt(d.projMax)}</span></b></div>` : ''}
+      ${d.noForecast ? '<p class="hint">Sem previsão neste dia. Lembre de incluir refeições e transporte.</p>' : ''}
+      ${items}
+      <button class="link" data-act="add-activity" data-date="${d.date}">+ Atividade neste dia</button></div>`;
+  }).join(''));
+  $('app').innerHTML = parts.join('');
+}
+
+function openActivitySheet(id, presetDate) {
+  const a = id ? S.activities.find((x) => x.id === id) : null;
+  const cur = S.trip.currency;
+  const order = S.people.map((p) => p.id);
+  const dflt = () => { const t = todayLocal(); return diffDays(t, S.trip.start) < 0 ? S.trip.start : (diffDays(t, S.trip.end) > 0 ? S.trip.end : t); };
+  const f = {
+    mode: a ? a.splitMode : 'equal',
+    selected: new Set(a ? a.participants : []),
+    custom: a && a.splitMode === 'custom' ? Object.fromEntries(a.shares.map((s) => [s.personId, { min: formatPlain(s.min, cur), max: formatPlain(s.max, cur) }])) : {},
+  };
+  const F = a ? getForecast() : null;
+  const info = a ? `<div class="card" style="margin-top:14px"><div class="kv"><span>Já gasto (vinculado)</span><b>${fmt(F.perActivity[a.id].spent)}</b></div>
+      ${a.status === 'planned' ? `<div class="kv"><span>Ainda previsto</span><b>${range(F.perActivity[a.id].remMin, F.perActivity[a.id].remMax)}</b></div>` : '<div class="hint">Atividade encerrada: sem previsão restante.</div>'}
+      <button class="btn" type="button" id="aAddExp">Registrar gasto desta atividade</button></div>` : '';
+  const body = openSheet(a ? 'Editar atividade' : 'Nova atividade', `<form id="actForm" novalidate>
+    <label>Atividade<input id="aTitle" maxlength="80" autocomplete="off" placeholder="Ex.: Parque, compras, jantar" value="${esc(a?.title ?? '')}"></label>
+    <label>Dia<input id="aDate" type="date" value="${a ? a.date : (presetDate || dflt())}"></label>
+    <label>Status<select id="aStatus">${optionsHtml(ACTIVITY_STATUS, a?.status ?? 'planned', 'id', 'label')}</select></label>
+    <div class="two"><label>Mínimo (${esc(cur)})<input id="aMin" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${a ? esc(formatPlain(a.min, cur)) : ''}"></label>
+      <label>Máximo (${esc(cur)})<input id="aMax" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${a ? esc(formatPlain(a.max, cur)) : ''}"></label></div>
+    <p class="hint">Informe os valores que você estimou. O app não inventa preços.</p>
+    <fieldset><legend>Quem participa?</legend><div id="splitBox"></div></fieldset>
+    ${info}
+    <div id="aErr" class="error" role="alert" hidden></div>
+    <button class="btn primary" type="submit">Salvar atividade</button>
+    ${a ? '<button class="btn danger" type="button" id="aDel">Excluir atividade</button>' : ''}</form>`);
+  const form = body.querySelector('form');
+  const box = $('splitBox');
+
+  const customParsed = () => Object.fromEntries(order.map((i) => [i, f.custom[i] ? { min: parseMoney(f.custom[i].min ?? '', cur), max: parseMoney(f.custom[i].max ?? '', cur) } : null]));
+
+  function renderSplit() {
+    const chips = S.people.map((p) => `<button type="button" class="chip ${f.selected.has(p.id) ? 'on' : ''}" data-pid="${p.id}" aria-pressed="${f.selected.has(p.id)}">${esc(p.name)}</button>`).join('');
+    const sel = S.people.filter((p) => f.selected.has(p.id));
+    const rows = sel.map((p) => (f.mode === 'equal'
+      ? `<div class="row"><span>${esc(p.name)}</span><strong data-prev="${p.id}">—</strong></div>`
+      : `<div class="row"><span>${esc(p.name)}</span><span class="pair">
+          <input class="cust" data-cid="${p.id}" data-k="min" inputmode="decimal" autocomplete="off" placeholder="mín." value="${esc(f.custom[p.id]?.min ?? '')}" aria-label="Mínimo de ${esc(p.name)}">
+          <input class="cust" data-cid="${p.id}" data-k="max" inputmode="decimal" autocomplete="off" placeholder="máx." value="${esc(f.custom[p.id]?.max ?? '')}" aria-label="Máximo de ${esc(p.name)}"></span></div>`)).join('');
+    box.innerHTML = `<div class="chips">${chips}<button type="button" class="chip" data-all>Todos</button></div>
+      <div class="seg"><button type="button" data-mode="equal" class="${f.mode === 'equal' ? 'on' : ''}">Dividir igualmente</button>
+      <button type="button" data-mode="custom" class="${f.mode === 'custom' ? 'on' : ''}">Personalizada</button></div>
+      ${sel.length ? rows : '<p class="hint">Toque nas pessoas que participam. Nada é escolhido automaticamente.</p>'}
+      <p id="splitSum" class="hint"></p><p id="splitSum2" class="hint"></p>`;
+    updatePreview();
+  }
+
+  function updatePreview() {
+    const min = parseMoney($('aMin').value, cur);
+    const max = parseMoney($('aMax').value, cur);
+    const s1 = $('splitSum'); const s2 = $('splitSum2');
+    if (!s1) return;
+    s1.textContent = ''; s2.textContent = ''; s1.className = 'hint'; s2.className = 'hint';
+    if (f.mode === 'equal') {
+      const r = min !== null && max !== null ? buildShares({ mode: 'equal', min, max, order, selected: f.selected }) : { ok: false };
+      box.querySelectorAll('[data-prev]').forEach((el) => {
+        const sh = r.ok ? r.shares.find((x) => x.personId === el.dataset.prev) : null;
+        el.textContent = sh ? range(sh.min, sh.max) : '—';
+      });
+    } else if (f.selected.size) {
+      const vals = customParsed();
+      const ids = order.filter((i) => f.selected.has(i));
+      const sMin = ids.reduce((acc, i) => acc + (vals[i]?.min ?? 0), 0);
+      const sMax = ids.reduce((acc, i) => acc + (vals[i]?.max ?? 0), 0);
+      const line = (el, label, sumV, total) => {
+        if (total === null) { el.textContent = `${label}: soma ${fmt(sumV)}`; return; }
+        const diff = total - sumV;
+        el.textContent = diff === 0 ? `${label}: soma ${fmt(sumV)} = total ✔` : `${label}: soma ${fmt(sumV)} de ${fmt(total)} · ${diff > 0 ? 'faltam' : 'passou'} ${fmt(Math.abs(diff))}`;
+        el.className = diff === 0 ? 'hint pos' : 'hint neg';
+      };
+      line(s1, 'Mínimo', sMin, min); line(s2, 'Máximo', sMax, max);
+    }
+  }
+
+  form.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.pid) { f.selected.has(b.dataset.pid) ? f.selected.delete(b.dataset.pid) : f.selected.add(b.dataset.pid); renderSplit(); }
+    else if (b.hasAttribute('data-all')) { order.forEach((i) => f.selected.add(i)); renderSplit(); }
+    else if (b.dataset.mode) { f.mode = b.dataset.mode; renderSplit(); }
+  });
+  form.addEventListener('input', (ev) => {
+    const el = ev.target;
+    if (el.id === 'aMin' || el.id === 'aMax') updatePreview();
+    else if (el.dataset.cid) { (f.custom[el.dataset.cid] ??= {})[el.dataset.k] = el.value; updatePreview(); }
+  });
+
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const errors = [];
+    const title = $('aTitle').value.trim();
+    const date = $('aDate').value;
+    const min = parseMoney($('aMin').value, cur);
+    const max = parseMoney($('aMax').value, cur);
+    if (!title) errors.push('Informe o nome da atividade.');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) errors.push('Informe o dia.');
+    if (min === null) errors.push('Informe o valor mínimo (pode ser 0,00).');
+    if (max === null) errors.push('Informe o valor máximo (pode ser 0,00).');
+    let shares = null;
+    if (min !== null && max !== null) {
+      const r = buildShares({ mode: f.mode, min, max, order, selected: f.selected, custom: customParsed() });
+      const nm = (pid) => S.people.find((p) => p.id === pid)?.name ?? '';
+      if (r.ok) shares = r.shares;
+      else if (r.code === 'min_gt_max') errors.push('O mínimo não pode ser maior que o máximo.');
+      else if (r.code === 'no_participant') errors.push('Escolha quem participa (uma ou mais pessoas).');
+      else if (r.code === 'missing_value') errors.push(`Informe mínimo e máximo de ${nm(r.personId)} (pode ser 0,00).`);
+      else if (r.code === 'person_min_gt_max') errors.push(`Para ${nm(r.personId)}, o mínimo não pode ser maior que o máximo.`);
+      else if (r.code === 'sum_min_mismatch') errors.push(`A soma dos mínimos por pessoa não fecha com ${fmt(min)} (${r.diff > 0 ? 'faltam' : 'passou'} ${fmt(Math.abs(r.diff))}).`);
+      else if (r.code === 'sum_max_mismatch') errors.push(`A soma dos máximos por pessoa não fecha com ${fmt(max)} (${r.diff > 0 ? 'faltam' : 'passou'} ${fmt(Math.abs(r.diff))}).`);
+    } else if (f.selected.size === 0) errors.push('Escolha quem participa (uma ou mais pessoas).');
+    showErrors($('aErr'), errors);
+    if (errors.length) return;
+    const obj = {
+      id: a?.id ?? uid(), date, title, status: $('aStatus').value, min, max, splitMode: f.mode,
+      participants: shares.map((s) => s.personId), shares, createdAt: a?.createdAt ?? localTimestamp(),
+    };
+    try {
+      await db.putActivity(obj);
+      S.activities = a ? S.activities.map((x) => (x.id === obj.id ? obj : x)) : [...S.activities, obj];
+      closeSheet(); render(); toast('Atividade salva');
+    } catch { showErrors($('aErr'), ['Não foi possível salvar no aparelho. Tente de novo.']); }
+  };
+  const addExp = $('aAddExp');
+  if (addExp) addExp.onclick = () => { closeSheet(); openExpenseSheet(null, { activityId: a.id }); };
+  const del = $('aDel');
+  if (del) del.onclick = async () => {
+    const linked = S.expenses.filter((x) => x.activityId === a.id);
+    const msg = linked.length
+      ? `Os ${linked.length} gasto(s) vinculado(s) <strong>continuam lançados</strong> (o saldo não muda); só perdem o vínculo com a atividade.`
+      : 'A atividade e a previsão dela serão removidas.';
+    if (!await confirmDialog({ title: `Excluir "${a.title}"?`, message: msg, okLabel: 'Excluir', danger: true })) return;
+    const unlinked = linked.map((x) => ({ ...x, activityId: null }));
+    await db.deleteActivity(a.id, unlinked);
+    S.activities = S.activities.filter((x) => x.id !== a.id);
+    S.expenses = S.expenses.map((x) => (x.activityId === a.id ? { ...x, activityId: null } : x));
+    closeSheet(); render(); toast('Atividade excluída');
+  };
+  renderSplit();
 }
 
 /* ---------- Formulário de entrada ---------- */
@@ -197,7 +430,7 @@ function openEntrySheet(id) {
 }
 
 /* ---------- Formulário de gasto ---------- */
-function openExpenseSheet(id) {
+function openExpenseSheet(id, preset = {}) {
   const ex = id ? S.expenses.find((e) => e.id === id) : null;
   const cur = S.trip.currency;
   const order = S.people.map((p) => p.id);
@@ -206,12 +439,19 @@ function openExpenseSheet(id) {
     selected: new Set(ex ? ex.consumers.map((c) => c.personId) : []),
     custom: ex && ex.splitMode === 'custom' ? Object.fromEntries(ex.consumers.map((c) => [c.personId, formatPlain(c.cents, cur)])) : {},
   };
+  const linkedId = ex ? (ex.activityId ?? '') : (preset.activityId ?? '');
+  const actOptions = [...S.activities].filter((x) => x.status !== 'cancelled' || x.id === linkedId)
+    .sort((p, q) => p.date.localeCompare(q.date) || p.title.localeCompare(q.title))
+    .map((x) => `<option value="${esc(x.id)}" ${x.id === linkedId ? 'selected' : ''}>${esc(formatDateBR(x.date))} · ${esc(x.title)}${x.status === 'done' ? ' (concluída)' : ''}</option>`).join('');
+  const actField = S.activities.length ? `<label>Atividade (opcional)<select id="fAct"><option value="">Sem atividade</option>${actOptions}</select></label>
+    <p class="hint">Vinculado a uma atividade, o gasto reduz o que ainda resta da previsão dela (sem contar duas vezes).</p>` : '';
   const body = openSheet(ex ? 'Editar gasto' : 'Novo gasto', `<form id="expForm" novalidate>
     <label>Valor (${esc(cur)})<input id="fAmount" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${ex ? esc(formatPlain(ex.cents, cur)) : ''}"></label>
     <label>Data<input id="fDate" type="date" value="${ex ? ex.date : todayLocal()}"></label>
     <label>Loja / local (opcional)<input id="fStore" maxlength="80" autocomplete="off" value="${esc(ex?.store ?? '')}"></label>
     <label>Categoria<select id="fCat">${optionsHtml(CATEGORIES, ex?.category ?? 'alimentacao', 'id', 'label')}</select></label>
     <label>Descrição (opcional)<input id="fDesc" maxlength="200" autocomplete="off" value="${esc(ex?.description ?? '')}"></label>
+    ${actField}
     <fieldset><legend>Quem consumiu?</legend><div id="splitBox"></div></fieldset>
     <div id="fErr" class="error" role="alert" hidden></div>
     <button class="btn primary" type="submit">Salvar gasto</button>
@@ -291,6 +531,7 @@ function openExpenseSheet(id) {
     const obj = {
       id: ex?.id ?? uid(), date, cents: total, store: $('fStore').value.trim(), category: $('fCat').value,
       description: $('fDesc').value.trim(), splitMode: f.mode, consumers, createdAt: ex?.createdAt ?? localTimestamp(),
+      activityId: $('fAct') ? ($('fAct').value || null) : (ex?.activityId ?? null),
     };
     try {
       await db.putExpense(obj);
@@ -394,10 +635,10 @@ async function handleRestoreFile(file) {
     return;
   }
   const s = result.summary;
-  const atual = S.trip ? `<p>Dados atuais que serão <strong>apagados</strong>: ${esc(S.trip.name)} — ${S.entries.length} entrada(s), ${S.expenses.length} gasto(s).</p>` : '';
+  const atual = S.trip ? `<p>Dados atuais que serão <strong>apagados</strong>: ${esc(S.trip.name)} — ${S.entries.length} entrada(s), ${S.expenses.length} gasto(s), ${S.activities.length} atividade(s).</p>` : '';
   const ok = await confirmDialog({
     title: 'Restaurar este backup?',
-    message: `${atual}<p>Backup: <strong>${esc(s.tripName)}</strong> (${formatDateBR(s.start)} a ${formatDateBR(s.end)}, ${esc(s.currency)}) — ${s.entries} entrada(s), ${s.expenses} gasto(s)${s.exportedAt ? `, exportado em ${esc(s.exportedAt.replace('T', ' '))}` : ''}.</p><p>Isso <strong>sobrescreve tudo</strong> o que está no app agora.</p>`,
+    message: `${atual}<p>Backup: <strong>${esc(s.tripName)}</strong> (${formatDateBR(s.start)} a ${formatDateBR(s.end)}, ${esc(s.currency)}) — ${s.entries} entrada(s), ${s.expenses} gasto(s), ${s.activities} atividade(s)${s.exportedAt ? `, exportado em ${esc(s.exportedAt.replace('T', ' '))}` : ''}.</p><p>Isso <strong>sobrescreve tudo</strong> o que está no app agora.</p>`,
     okLabel: 'Sobrescrever e restaurar', danger: true,
   });
   if (!ok) return;
@@ -417,6 +658,10 @@ document.addEventListener('click', (ev) => {
   else if (act === 'edit-expense') openExpenseSheet(el.dataset.id);
   else if (act === 'new-entry') openEntrySheet(null);
   else if (act === 'edit-entry') openEntrySheet(el.dataset.id);
+  else if (act === 'new-activity') openActivitySheet(null);
+  else if (act === 'add-activity') openActivitySheet(null, el.dataset.date);
+  else if (act === 'edit-activity') openActivitySheet(el.dataset.id);
+  else if (act === 'goto') { view = el.dataset.view; render(); window.scrollTo(0, 0); }
   else if (act === 'export') exportBackup();
   else if (act === 'restore') { $('filePicker').value = ''; $('filePicker').click(); }
 });
