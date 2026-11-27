@@ -33,12 +33,22 @@ Formato (valores em centavos; `participants` omitido = as 3 pessoas):
 ```
 **Não publique no repositório um cronograma real** (endereços, reservas): ele é importado pelo app e fica só no aparelho.
 
+## Notas fiscais (sem custo, sem IA)
+Gastos > **📷 Nota fiscal**: tire a foto ou escolha da galeria (ela é comprimida e fica só no aparelho) ou lance sem foto.
+A foto é só referência: **você digita** os itens, impostos, descontos e gorjeta na tela de revisão. Não há leitura automática, API paga, chave ou servidor.
+- Cada item é atribuído a uma ou mais pessoas (o app não adivinha) e pode ser dividido por quantidade.
+- Impostos adicionados, descontos e gorjeta são rateados proporcionalmente; imposto marcado como "já incluído" não é somado de novo.
+- Só confirma se as partes fecharem com o total impresso. Uma nota gera **um único gasto**; avisa se houver gasto na mesma data com o mesmo valor.
+- Moeda da nota diferente da viagem: você informa o valor convertido.
+- Notas **pendentes** ainda não entram no saldo. **O backup não inclui as fotos**, só os dados.
+
 ## Backup
 Ajustes → **Exportar backup**: salve o `.json` em Arquivos/iCloud. Restaurar valida o arquivo e pede confirmação antes de sobrescrever. Faça um backup antes e depois da viagem.
 
 ## Testes (no computador)
 - `npm test` — cálculos, divisões, datas, backup e consistência do PWA.
 - `NODE_PATH=$(npm root -g) node tests/e2e-smoke.cjs` — fluxo da Fase 1 no Chromium (precisa do Playwright).
+- `NODE_PATH=$(npm root -g) node tests/e2e-notas.cjs` — notas fiscais (dados fictícios).
 - `NODE_PATH=$(npm root -g) node tests/e2e-valores.cjs` — tela "Definir valores" (dados fictícios).
 - `NODE_PATH=$(npm root -g) node tests/e2e-cronograma.cjs` — importação, ícones e linha do tempo (dados fictícios).
 - `NODE_PATH=$(npm root -g) node tests/e2e-fase2.cjs` — Fase 2 e atualização da v1 para a v2 com dados gravados.

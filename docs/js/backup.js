@@ -1,14 +1,15 @@
 // Exportação e validação de backup JSON. Só aceita dados que passem por validação completa;
 // o resultado é reconstruído campo a campo (campos desconhecidos são descartados).
-import { CATEGORIES, PERSON_IDS, ACTIVITY_STATUS } from './constants.js';
+import { CATEGORIES, PERSON_IDS, ACTIVITY_STATUS, CURRENCIES } from './constants.js';
 import { isValidDate, localTimestamp } from './dates.js';
 import { sum } from './money.js';
+import { computeReceipt } from './receipt.js';
 import { validateTrip, validatePeopleNames } from './trip.js';
 
 export const APP_ID = 'gastos-viagem';
-export const SCHEMA_VERSION = 2; // sobe junto com DB_VERSION quando o formato mudar
+export const SCHEMA_VERSION = 3; // sobe junto com DB_VERSION quando o formato mudar
 
-export function buildBackup({ trip, people, entries, expenses, activities = [] }, now = new Date()) {
+export function buildBackup({ trip, people, entries, expenses, activities = [], receipts = [] }, now = new Date()) {
   return {
     app: APP_ID,
     schema: SCHEMA_VERSION,
@@ -21,8 +22,17 @@ export function buildBackup({ trip, people, entries, expenses, activities = [] }
     expenses: expenses.map((x) => ({
       id: x.id, date: x.date, cents: x.cents, store: x.store, category: x.category,
       description: x.description, splitMode: x.splitMode, createdAt: x.createdAt,
-      activityId: x.activityId ?? null,
+      activityId: x.activityId ?? null, receiptId: x.receiptId ?? null,
       consumers: x.consumers.map((c) => ({ personId: c.personId, cents: c.cents })),
+    })),
+    // As FOTOS das notas não entram no backup (ficam só no aparelho); os dados lançados entram.
+    receipts: receipts.map((r) => ({
+      id: r.id, status: r.status, createdAt: r.createdAt, store: r.store, date: r.date, currency: r.currency,
+      category: r.category, activityId: r.activityId ?? null, expenseId: r.expenseId ?? null, hasPhoto: false,
+      tipCents: r.tipCents ?? null, printedTotalCents: r.printedTotalCents ?? null, convertedTotalCents: r.convertedTotalCents ?? null,
+      items: r.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, cents: i.cents ?? null, personIds: [...i.personIds], qtyBy: i.qtyBy ?? null })),
+      taxes: r.taxes.map((t) => ({ name: t.name, cents: t.cents ?? null, included: Boolean(t.included) })),
+      discounts: r.discounts.map((d) => ({ name: d.name, cents: d.cents ?? null })),
     })),
     activities: activities.map((a) => ({
       id: a.id, date: a.date, title: a.title, status: a.status, min: a.min ?? null, max: a.max ?? null,
@@ -37,6 +47,7 @@ export function buildBackup({ trip, people, entries, expenses, activities = [] }
 export function migrateBackup(raw) {
   let r = raw;
   if (r.schema < 2) r = { ...r, schema: 2, activities: [] }; // schema 1 não tinha cronograma
+  if (r.schema < 3) r = { ...r, schema: 3, receipts: [] }; // schema 1-2 não tinham notas fiscais
   return r;
 }
 
@@ -154,6 +165,72 @@ export function validateBackup(input) {
     }
   });
 
+  // Notas fiscais (sem fotos)
+  const receipts = [];
+  const receiptIds = new Set();
+  const confirmed = [];
+  const tripCur = trip && trip.currency;
+  if (!Array.isArray(raw.receipts)) errors.push('Lista de notas fiscais ausente.');
+  else raw.receipts.forEach((r, i) => {
+    const label = `Nota ${i + 1}`;
+    if (!r || typeof r !== 'object') { errors.push(`${label}: inválida.`); return; }
+    let bad = dupId(r.id, label);
+    const nullOr = (v, f) => v === null || v === undefined || f(v);
+    if (r.status !== 'pending' && r.status !== 'confirmed') { errors.push(`${label}: status inválido.`); bad = true; }
+    if (!isStr(r.store ?? '', 80)) { errors.push(`${label}: loja inválida.`); bad = true; }
+    if (!(r.date === '' || r.date === undefined || isValidDate(r.date))) { errors.push(`${label}: data inválida.`); bad = true; }
+    if (!CURRENCIES.some((c) => c.code === r.currency)) { errors.push(`${label}: moeda inválida.`); bad = true; }
+    if (!CATEGORIES.some((c) => c.id === r.category)) { errors.push(`${label}: categoria inválida.`); bad = true; }
+    if (!nullOr(r.tipCents, isMoney0) || !nullOr(r.printedTotalCents, isMoney0) || !nullOr(r.convertedTotalCents, isMoney0)) { errors.push(`${label}: valores inválidos.`); bad = true; }
+    const items = [];
+    if (!Array.isArray(r.items) || r.items.length > 200) { errors.push(`${label}: itens inválidos.`); bad = true; }
+    else {
+      for (const it of r.items) {
+        const okIt = it && isStr(it.id, 64) && it.id && isStr(it.name ?? '', 80) && Number.isInteger(it.qty) && it.qty >= 1 && it.qty <= 999
+          && nullOr(it.cents, isCents) && Array.isArray(it.personIds) && it.personIds.every((p, k) => personIds.has(p) && it.personIds.indexOf(p) === k)
+          && (it.qtyBy === null || it.qtyBy === undefined || (typeof it.qtyBy === 'object' && Object.entries(it.qtyBy).every(([p, n]) => it.personIds.includes(p) && Number.isInteger(n) && n >= 0 && n <= 999)));
+        if (!okIt) { errors.push(`${label}: item inválido.`); bad = true; break; }
+        items.push({ id: it.id, name: it.name ?? '', qty: it.qty, cents: it.cents ?? null, personIds: [...it.personIds], qtyBy: it.qtyBy ? { ...it.qtyBy } : null });
+      }
+    }
+    const taxes = [];
+    const discounts = [];
+    if (!Array.isArray(r.taxes) || r.taxes.length > 20 || !Array.isArray(r.discounts) || r.discounts.length > 20) { errors.push(`${label}: impostos/descontos inválidos.`); bad = true; }
+    else {
+      for (const t of r.taxes) {
+        if (!t || !isStr(t.name ?? '', 40) || !nullOr(t.cents, isCents) || typeof t.included !== 'boolean') { errors.push(`${label}: imposto inválido.`); bad = true; break; }
+        taxes.push({ name: t.name ?? '', cents: t.cents ?? null, included: t.included });
+      }
+      for (const d of r.discounts) {
+        if (!d || !isStr(d.name ?? '', 40) || !nullOr(d.cents, isCents)) { errors.push(`${label}: desconto inválido.`); bad = true; break; }
+        discounts.push({ name: d.name ?? '', cents: d.cents ?? null });
+      }
+    }
+    if (r.activityId !== null && r.activityId !== undefined && !activityIds.has(r.activityId)) { errors.push(`${label}: vinculada a uma atividade que não existe.`); bad = true; }
+    if (r.status === 'pending' && r.expenseId) { errors.push(`${label}: nota pendente não pode ter gasto.`); bad = true; }
+    let finalTotal = null;
+    let consumers = null;
+    if (!bad && r.status === 'confirmed') {
+      if (typeof r.expenseId !== 'string' || !r.expenseId) { errors.push(`${label}: nota confirmada sem gasto.`); bad = true; }
+      else {
+        const c = computeReceipt({ items, taxes, discounts, tipCents: r.tipCents ?? null, printedTotalCents: r.printedTotalCents ?? null,
+          convertedTotalCents: r.convertedTotalCents ?? null, foreign: r.currency !== tripCur, order: [...personIds] });
+        if (!c.ok) { errors.push(`${label}: as partes não fecham com o total.`); bad = true; }
+        else { finalTotal = c.finalTotal; consumers = c.consumers; }
+      }
+    }
+    if (!bad) {
+      receiptIds.add(r.id);
+      receipts.push({
+        id: r.id, status: r.status, createdAt: cleanTs(r.createdAt), store: r.store ?? '', date: r.date ?? '', currency: r.currency,
+        category: r.category, activityId: r.activityId ?? null, expenseId: r.status === 'confirmed' ? r.expenseId : null, hasPhoto: false,
+        tipCents: r.tipCents ?? null, printedTotalCents: r.printedTotalCents ?? null, convertedTotalCents: r.convertedTotalCents ?? null,
+        items, taxes, discounts,
+      });
+      if (r.status === 'confirmed') confirmed.push({ id: r.id, expenseId: r.expenseId, finalTotal, consumers, label });
+    }
+  });
+
   // Gastos
   const expenses = [];
   if (!Array.isArray(raw.expenses)) errors.push('Lista de gastos ausente.');
@@ -168,6 +245,8 @@ export function validateBackup(input) {
     if (x.splitMode !== 'equal' && x.splitMode !== 'custom') { errors.push(`${label}: modo de divisão inválido.`); bad = true; }
     const activityId = x.activityId ?? null;
     if (activityId !== null && !activityIds.has(activityId)) { errors.push(`${label}: vinculado a uma atividade que não existe.`); bad = true; }
+    const receiptId = x.receiptId ?? null;
+    if (receiptId !== null && !receiptIds.has(receiptId)) { errors.push(`${label}: vinculado a uma nota que não existe.`); bad = true; }
     let consumers = [];
     if (!Array.isArray(x.consumers) || x.consumers.length === 0) {
       errors.push(`${label}: sem consumidores.`); bad = true;
@@ -188,16 +267,27 @@ export function validateBackup(input) {
     if (!bad) {
       expenses.push({
         id: x.id, date: x.date, cents: x.cents, store: x.store ?? '', category: x.category,
-        description: x.description ?? '', splitMode: x.splitMode, consumers, createdAt: cleanTs(x.createdAt), activityId,
+        description: x.description ?? '', splitMode: x.splitMode, consumers, createdAt: cleanTs(x.createdAt), activityId, receiptId,
       });
     }
   });
 
+  // Cada nota confirmada deve ter exatamente UM gasto, igual ao rateio calculado
+  for (const c of confirmed) {
+    const ex = expenses.find((x) => x.id === c.expenseId);
+    const sameParts = ex && ex.consumers.filter((p) => p.cents > 0).length === c.consumers.length
+      && c.consumers.every((p) => ex.consumers.find((q) => q.personId === p.personId)?.cents === p.cents);
+    if (!ex || ex.receiptId !== c.id || ex.cents !== c.finalTotal || !sameParts) errors.push(`${c.label}: o gasto lançado não confere com a nota.`);
+  }
+  for (const x of expenses) {
+    if (x.receiptId && confirmed.filter((c) => c.expenseId === x.id).length !== 1) errors.push('Um gasto vinculado a nota não tem a nota correspondente.');
+  }
+
   if (errors.length) return { ok: false, errors: errors.slice(0, 12) };
   return {
     ok: true, errors: [],
-    data: { trip: { ...trip, name: trip.name.trim() }, people, entries, expenses, activities },
+    data: { trip: { ...trip, name: trip.name.trim() }, people, entries, expenses, activities, receipts },
     summary: { tripName: trip.name.trim(), start: trip.start, end: trip.end, currency: trip.currency,
-      entries: entries.length, expenses: expenses.length, activities: activities.length, exportedAt: isStr(raw.exportedAt, 30) ? raw.exportedAt : '' },
+      entries: entries.length, expenses: expenses.length, activities: activities.length, receipts: receipts.length, exportedAt: isStr(raw.exportedAt, 30) ? raw.exportedAt : '' },
   };
 }

@@ -115,7 +115,7 @@ const norm = (s) => s.replace(/\s/g, ' ');
   const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-act=export]')]);
   const file = path.join(os.tmpdir(), 'bk2.json'); await dl.saveAs(file);
   const bk = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(bk.schema, 2); assert.equal(bk.activities.length, 3);
+  assert.equal(bk.schema, 3); assert.equal(bk.activities.length, 3);
   assert.equal(bk.expenses.filter((x) => x.activityId).length, 1);
   // exclui "Parque": gasto continua, perde o vínculo
   await page.click('[data-tab=crono]'); await page.locator('.item', { hasText: 'Parque' }).first().click(); await page.click('#aDel');

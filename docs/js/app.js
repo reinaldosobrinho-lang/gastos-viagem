@@ -10,6 +10,8 @@ import { buildTimelineSvg, COL } from './chart.js';
 import { ICON_CHOICES, DEFAULT_ICON, suggestIcon } from './icons.js';
 import { parseScheduleImport } from './schedule-import.js';
 import { applyBulkPrices } from './bulk-price.js';
+import { computeReceipt, findDuplicates } from './receipt.js';
+import { compressImage } from './image.js';
 import { dashboard } from './calc.js';
 import { buildBackup, validateBackup } from './backup.js';
 import { validateTrip, validatePeopleNames } from './trip.js';
@@ -19,10 +21,10 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
 
-let S = { trip: null, people: [], entries: [], expenses: [], activities: [] };
+let S = { trip: null, people: [], entries: [], expenses: [], activities: [], receipts: [] };
 let view = 'painel';
 const fmt = (c) => formatMoney(c, S.trip.currency);
-const hasData = () => S.entries.length > 0 || S.expenses.length > 0 || S.activities.length > 0;
+const hasData = () => S.entries.length > 0 || S.expenses.length > 0 || S.activities.length > 0 || S.receipts.length > 0;
 const STATUS_LABEL = Object.fromEntries(ACTIVITY_STATUS.map((x) => [x.id, x.label]));
 const activityTitle = (id) => S.activities.find((a) => a.id === id)?.title ?? '';
 
@@ -46,7 +48,9 @@ function openSheet(title, html) {
   sheet.querySelector('[data-close]').onclick = closeSheet;
   return sheet.querySelector('.sheet-body');
 }
+let photoUrl = null;
 function closeSheet() {
+  if (photoUrl) { URL.revokeObjectURL(photoUrl); photoUrl = null; }
   $('sheet').hidden = true; $('sheet').innerHTML = '';
   document.body.classList.remove('noscroll');
 }
@@ -158,10 +162,17 @@ function consumersLabel(x) {
 function renderGastos() {
   const groups = groupByDate(S.expenses);
   const body = [...groups.entries()].map(([d, list]) => `<div class="list-group"><h3><span>${esc(dayLabel(d))}</span><span>${fmt(list.reduce((a, x) => a + x.cents, 0))}</span></h3>
-    ${list.map((x) => `<button class="item" data-act="edit-expense" data-id="${esc(x.id)}"><div><div class="t">${esc(x.store || categoryLabel(x.category))}</div>
+    ${list.map((x) => `<button class="item" data-act="edit-expense" data-id="${esc(x.id)}"><div><div class="t">${x.receiptId ? '🧾 ' : ''}${esc(x.store || categoryLabel(x.category))}</div>
       <div class="s">${esc(categoryLabel(x.category))}${x.description ? ' · ' + esc(x.description) : ''}</div><div class="s">${esc(consumersLabel(x))}</div>${x.activityId && activityTitle(x.activityId) ? `<div class="s">${esc(S.activities.find((a) => a.id === x.activityId)?.icon || '🗓️')} ${esc(activityTitle(x.activityId))}</div>` : ''}</div>
       <div class="amt">${fmt(x.cents)}</div></button>`).join('')}</div>`).join('');
-  $('app').innerHTML = `<button class="btn primary" data-act="new-expense" style="margin-top:0">+ Novo gasto</button>
+  const pend = S.receipts.filter((r) => r.status === 'pending');
+  const pendCard = pend.length ? `<div class="card pend"><h2>Notas pendentes (${pend.length})</h2>
+      <p class="hint neg"><strong>Ainda NÃO entram no saldo.</strong> Abra cada uma, confira e confirme para lançar.</p>
+      ${pend.map((r) => `<button class="item" data-act="open-receipt" data-id="${esc(r.id)}"><span class="ico big" aria-hidden="true">🧾</span><div style="flex:1">
+        <div class="t">${esc(r.store || 'Nota sem loja')}</div>
+        <div class="s">${r.date ? formatDateBR(r.date) : 'sem data'} · ${r.items.length} item(ns) · ${r.hasPhoto ? 'com foto' : 'sem foto'}</div></div><span class="badge cancelled">Pendente</span></button>`).join('')}</div>` : '';
+  $('app').innerHTML = `<div class="two"><button class="btn primary" data-act="new-expense" style="margin-top:0">+ Novo gasto</button><button class="btn" data-act="new-note" style="margin-top:0">📷 Nota fiscal</button></div>
+    ${pendCard}
     ${body || '<p class="muted center" style="margin-top:32px">Nenhum gasto lançado ainda.</p>'}`;
 }
 
@@ -685,6 +696,7 @@ function openEntrySheet(id) {
 /* ---------- Formulário de gasto ---------- */
 function openExpenseSheet(id, preset = {}) {
   const ex = id ? S.expenses.find((e) => e.id === id) : null;
+  if (ex?.receiptId) { openReceiptSheet(ex.receiptId); return; }
   const cur = S.trip.currency;
   const order = S.people.map((p) => p.id);
   const f = {
@@ -784,7 +796,7 @@ function openExpenseSheet(id, preset = {}) {
     const obj = {
       id: ex?.id ?? uid(), date, cents: total, store: $('fStore').value.trim(), category: $('fCat').value,
       description: $('fDesc').value.trim(), splitMode: f.mode, consumers, createdAt: ex?.createdAt ?? localTimestamp(),
-      activityId: $('fAct') ? ($('fAct').value || null) : (ex?.activityId ?? null),
+      activityId: $('fAct') ? ($('fAct').value || null) : (ex?.activityId ?? null), receiptId: null,
     };
     try {
       await db.putExpense(obj);
@@ -800,6 +812,328 @@ function openExpenseSheet(id, preset = {}) {
     closeSheet(); render(); toast('Gasto excluído');
   };
   renderSplit();
+}
+
+/* ---------- Notas fiscais (lançamento manual, foto só como referência) ---------- */
+const fmtIn = (c, cur) => formatMoney(c, cur);
+const parseVal = (text, cur) => {
+  const t = (text ?? '').trim();
+  if (!t) return { empty: true, cents: null };
+  const c = parseMoney(t, cur);
+  return c === null ? { bad: true, cents: null } : { cents: c };
+};
+
+function openNoteSourceSheet() {
+  const body = openSheet('Nota fiscal', `<p class="hint">A foto fica só neste aparelho (comprimida) e serve de referência para você digitar a nota. Nada é enviado a lugar nenhum e <strong>nada entra no saldo até você confirmar</strong>.</p>
+    <button class="btn primary" type="button" id="nCam">📷 Tirar foto</button>
+    <button class="btn" type="button" id="nGal">🖼️ Escolher da galeria</button>
+    <button class="btn" type="button" id="nNone">✍️ Lançar sem foto</button>`);
+  body.querySelector('#nCam').onclick = () => { $('camPicker').value = ''; $('camPicker').click(); };
+  body.querySelector('#nGal').onclick = () => { $('galPicker').value = ''; $('galPicker').click(); };
+  body.querySelector('#nNone').onclick = async () => { const r = await createReceipt(null); closeSheet(); render(); openReceiptSheet(r.id); };
+}
+
+async function createReceipt(photo) {
+  const r = {
+    id: uid(), status: 'pending', createdAt: localTimestamp(), store: '', date: todayLocal(), currency: S.trip.currency, category: 'compras',
+    activityId: null, expenseId: null, hasPhoto: Boolean(photo), tipCents: null, printedTotalCents: null, convertedTotalCents: null,
+    items: [], taxes: [], discounts: [],
+  };
+  if (photo) await db.putPhoto({ id: r.id, type: photo.type, bytes: photo.bytes });
+  await db.putReceipt(r);
+  S.receipts = [...S.receipts, r];
+  return r;
+}
+
+async function handleNoteFile(file) {
+  if (!file) return;
+  toast('Comprimindo a foto…');
+  try {
+    const photo = await compressImage(file);
+    const r = await createReceipt(photo);
+    closeSheet(); render(); openReceiptSheet(r.id);
+  } catch (e) {
+    await confirmDialog({ title: 'Não foi possível usar a foto', message: esc(e?.message || 'Tente outra foto.'), okLabel: 'Ok' });
+  }
+}
+
+function showPhotoViewer(url) {
+  const el = $('dialog');
+  el.innerHTML = `<div class="viewer"><button class="btn primary" type="button" id="vClose" style="margin:0 0 8px">Fechar foto</button>
+    <div class="vscroll"><img id="vImg" src="${url}" alt="Foto da nota fiscal"></div><p class="hint" style="color:#fff">Toque na foto para ampliar ou reduzir.</p></div>`;
+  el.hidden = false;
+  let big = false;
+  $('vImg').onclick = () => { big = !big; $('vImg').style.width = big ? '240%' : '100%'; };
+  $('vClose').onclick = () => { el.hidden = true; el.innerHTML = ''; };
+}
+
+function openReceiptSheet(id) {
+  const rc = S.receipts.find((r) => r.id === id);
+  if (!rc) return;
+  const tripCur = S.trip.currency;
+  const order = S.people.map((p) => p.id);
+  const isConfirmed = rc.status === 'confirmed';
+  const f = {
+    store: rc.store, date: rc.date || todayLocal(), currency: rc.currency, category: rc.category, activityId: rc.activityId ?? '',
+    items: rc.items.map((it) => ({
+      name: it.name, qty: String(it.qty), price: it.cents !== null ? formatPlain(it.cents, rc.currency) : '', personIds: new Set(it.personIds),
+      qtyMode: Boolean(it.qtyBy), qtyBy: Object.fromEntries(Object.entries(it.qtyBy ?? {}).map(([k, v]) => [k, String(v)])),
+    })),
+    taxes: rc.taxes.map((t) => ({ name: t.name, text: t.cents !== null ? formatPlain(t.cents, rc.currency) : '', included: t.included })),
+    discounts: rc.discounts.map((d) => ({ name: d.name, text: d.cents !== null ? formatPlain(d.cents, rc.currency) : '' })),
+    tip: rc.tipCents !== null ? formatPlain(rc.tipCents, rc.currency) : '',
+    total: rc.printedTotalCents !== null ? formatPlain(rc.printedTotalCents, rc.currency) : '',
+    conv: rc.convertedTotalCents !== null ? formatPlain(rc.convertedTotalCents, tripCur) : '',
+  };
+  const actOptions = [...S.activities].filter((x) => x.status !== 'cancelled' || x.id === f.activityId)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title))
+    .map((x) => `<option value="${esc(x.id)}" ${x.id === f.activityId ? 'selected' : ''}>${esc(formatDateBR(x.date))} · ${esc(x.title)}</option>`).join('');
+  const body = openSheet(isConfirmed ? 'Nota fiscal' : 'Revisar nota', `<form id="rcForm" novalidate>
+    ${isConfirmed ? '<div class="alert ok">Nota confirmada: gera <strong>um único gasto</strong> no saldo. Ao salvar alterações, esse gasto é atualizado.</div>'
+      : '<div class="alert warn"><strong>Pendente: ainda não entra no saldo.</strong> Digite os dados olhando a foto e confirme no final.</div>'}
+    <div id="rcPhoto"></div>
+    <label>Loja<input id="rcStore" maxlength="80" autocomplete="off" value="${esc(f.store)}"></label>
+    <div class="two"><label>Data da nota<input id="rcDate" type="date" value="${esc(f.date)}"></label>
+      <label>Moeda da nota<select id="rcCur">${CURRENCIES.map((c) => `<option value="${c.code}" ${c.code === f.currency ? 'selected' : ''}>${c.code}</option>`).join('')}</select></label></div>
+    <label>Categoria<select id="rcCat">${optionsHtml(CATEGORIES, f.category, 'id', 'label')}</select></label>
+    ${S.activities.length ? `<label>Atividade (opcional)<select id="rcAct"><option value="">Sem atividade</option>${actOptions}</select></label>` : ''}
+    <fieldset><legend>Itens da nota</legend><div id="rcItems"></div><button class="btn" type="button" data-add-item>+ Adicionar item</button></fieldset>
+    <fieldset><legend>Impostos</legend><div id="rcTaxes"></div><button class="btn" type="button" data-add-tax>+ Imposto</button>
+      <p class="hint">Marque "já incluído no preço" quando o imposto já está dentro do valor dos itens: assim ele não é somado de novo.</p></fieldset>
+    <fieldset><legend>Descontos</legend><div id="rcDiscs"></div><button class="btn" type="button" data-add-disc>+ Desconto</button></fieldset>
+    <label>Gorjeta (opcional)<input id="rcTip" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(f.tip)}"></label>
+    <label>Total impresso na nota<input id="rcTotal" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(f.total)}"></label>
+    <div id="rcConvBox"></div>
+    <div id="rcSummary" class="card" style="margin-top:14px"></div>
+    <div id="rcErr" class="error" role="alert" hidden></div>
+    <button class="btn primary" type="submit">${isConfirmed ? 'Salvar alterações' : 'Confirmar e lançar no saldo'}</button>
+    ${isConfirmed ? '' : '<button class="btn" type="button" id="rcDraft">Salvar como pendente</button>'}
+    <button class="btn danger" type="button" id="rcDel">Excluir nota${isConfirmed ? ' e o gasto' : ''}</button></form>`);
+  const form = body.querySelector('form');
+
+  // foto de referência
+  if (rc.hasPhoto) {
+    db.getPhoto(rc.id).then((ph) => {
+      if (!ph || !$('rcPhoto')) return;
+      if (photoUrl) URL.revokeObjectURL(photoUrl);
+      photoUrl = URL.createObjectURL(new Blob([ph.bytes], { type: ph.type }));
+      $('rcPhoto').innerHTML = `<img class="rc-thumb" src="${photoUrl}" alt="Foto da nota" data-view-photo><button class="link" type="button" data-view-photo>Ver foto grande</button>`;
+    }).catch(() => {});
+  } else $('rcPhoto').innerHTML = '<p class="hint">Sem foto (a foto não entra no backup).</p>';
+
+  const person = (p, cls, attr, on) => `<button type="button" class="chip ${on ? 'on' : ''}" ${attr} aria-pressed="${on}">${esc(p.name)}</button>`;
+  function renderItems() {
+    $('rcItems').innerHTML = f.items.map((it, i) => {
+      const q = /^\d+$/.test(it.qty.trim()) ? Number(it.qty) : 0;
+      const sel = S.people.filter((p) => it.personIds.has(p.id));
+      const canQty = q > 1 && sel.length > 1;
+      return `<div class="rc-item" data-i="${i}">
+        <div class="two"><label>Item<input class="it-name" maxlength="80" autocomplete="off" value="${esc(it.name)}" placeholder="Ex.: Camiseta"></label>
+          <label>Valor da linha<input class="it-price" inputmode="decimal" autocomplete="off" value="${esc(it.price)}" placeholder="0,00"></label></div>
+        <div class="two"><label>Quantidade<input class="it-qty" inputmode="numeric" autocomplete="off" value="${esc(it.qty)}"></label>
+          <div style="display:flex;align-items:flex-end"><button type="button" class="link" data-rm-item>Remover item</button></div></div>
+        <div class="hint"><strong>Para quem é?</strong> Escolha; o app não adivinha.</div>
+        <div class="chips">${S.people.map((p) => person(p, '', `data-p="${p.id}"`, it.personIds.has(p.id))).join('')}<button type="button" class="chip" data-all-p>Todos</button></div>
+        ${canQty ? `<button type="button" class="chip ${it.qtyMode ? 'on' : ''}" data-qtymode>Dividir por quantidade</button>` : ''}
+        ${canQty && it.qtyMode ? sel.map((p) => `<div class="row"><span>${esc(p.name)}</span><input class="it-qtyby" data-pid="${p.id}" inputmode="numeric" autocomplete="off" placeholder="qtd." value="${esc(it.qtyBy[p.id] ?? '')}" aria-label="Quantidade de ${esc(p.name)}"></div>`).join('') : ''}
+      </div>`;
+    }).join('') || '<p class="hint">Nenhum item ainda. Adicione os itens que aparecem na nota.</p>';
+  }
+  function renderLines() {
+    $('rcTaxes').innerHTML = f.taxes.map((t, i) => `<div class="rc-line" data-i="${i}"><div class="two"><input class="tx-name" maxlength="40" placeholder="Nome (ex.: Sales tax)" value="${esc(t.name)}" aria-label="Nome do imposto">
+      <input class="tx-val" inputmode="decimal" placeholder="0,00" value="${esc(t.text)}" aria-label="Valor do imposto"></div>
+      <label class="check"><input type="checkbox" class="tx-inc" ${t.included ? 'checked' : ''}> já incluído no preço dos itens</label><button type="button" class="link" data-rm-tax>Remover</button></div>`).join('');
+    $('rcDiscs').innerHTML = f.discounts.map((d, i) => `<div class="rc-line" data-i="${i}"><div class="two"><input class="ds-name" maxlength="40" placeholder="Nome (ex.: Cupom)" value="${esc(d.name)}" aria-label="Nome do desconto">
+      <input class="ds-val" inputmode="decimal" placeholder="0,00" value="${esc(d.text)}" aria-label="Valor do desconto"></div><button type="button" class="link" data-rm-disc>Remover</button></div>`).join('');
+  }
+  function renderConv() {
+    $('rcConvBox').innerHTML = f.currency !== tripCur
+      ? `<label>Valor convertido em ${esc(tripCur)} (obrigatório: moeda da nota ≠ moeda da viagem)<input id="rcConv" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(f.conv)}"></label>
+         <p class="hint">Digite quanto essa nota custou de fato em ${esc(tripCur)} (valor do cartão/câmbio). O app não consulta cotação.</p>` : '';
+  }
+
+  // lê o formulário -> entrada de computeReceipt (+ problemas de formato)
+  function buildInput() {
+    const cur = f.currency;
+    const issues = [];
+    const val = (t, label) => { const r = parseVal(t, cur); if (r.bad) issues.push(`${label}: valor inválido.`); return r.cents; };
+    const intOrNaN = (t) => (/^\d+$/.test(String(t ?? '').trim()) ? Number(t) : NaN);
+    const items = f.items.map((it, i) => {
+      const qty = intOrNaN(it.qty);
+      const useQty = it.qtyMode && qty > 1 && it.personIds.size > 1;
+      return { cents: val(it.price, it.name || `Item ${i + 1}`), qty, personIds: [...it.personIds],
+        qtyBy: useQty ? Object.fromEntries([...it.personIds].map((pid) => [pid, intOrNaN(it.qtyBy[pid])])) : null };
+    });
+    const taxes = f.taxes.map((t, i) => ({ cents: val(t.text, `Imposto ${i + 1}`), included: t.included }));
+    const discounts = f.discounts.map((d, i) => ({ cents: val(d.text, `Desconto ${i + 1}`) }));
+    const tipCents = val(f.tip, 'Gorjeta');
+    const printedTotalCents = val(f.total, 'Total impresso');
+    const cv = parseVal(f.conv, tripCur);
+    if (cv.bad) issues.push('Valor convertido: valor inválido.');
+    return { issues, input: { items, taxes, discounts, tipCents, printedTotalCents, convertedTotalCents: cv.cents, foreign: f.currency !== tripCur, order } };
+  }
+  const nameOf = (i) => f.items[i]?.name || `Item ${i + 1}`;
+  function errText(e, c) {
+    const cur = f.currency;
+    switch (e.code) {
+      case 'no_items': return 'Adicione ao menos um item.';
+      case 'item_price': return `${nameOf(e.index)}: informe o valor da linha (maior que zero).`;
+      case 'item_qty': return `${nameOf(e.index)}: quantidade inválida (de 1 a 999).`;
+      case 'item_unassigned': return `${nameOf(e.index)}: escolha para quem é.`;
+      case 'item_qty_value': return `${nameOf(e.index)}: informe a quantidade de cada pessoa (mínimo 1).`;
+      case 'item_qty_sum': return `${nameOf(e.index)}: as quantidades somam ${e.a}, mas o item tem ${e.b}.`;
+      case 'line_value': return `${e.kind === 'tax' ? 'Imposto' : 'Desconto'} ${e.index + 1}: informe o valor.`;
+      case 'discount_exceeds': return 'Os descontos passam do subtotal dos itens.';
+      case 'no_printed_total': return 'Informe o total impresso na nota.';
+      case 'total_mismatch': return `As partes somam ${fmtIn(c.computedTotal, cur)}, mas o total da nota é ${fmtIn(c.computedTotal + e.diff, cur)} (${e.diff > 0 ? 'faltam' : 'sobram'} ${fmtIn(Math.abs(e.diff), cur)}). Confira itens, impostos, descontos e gorjeta.`;
+      case 'no_converted': return `Informe o valor convertido em ${tripCur}.`;
+      default: return 'Dado inválido.';
+    }
+  }
+  function evaluate() {
+    const { issues, input } = buildInput();
+    const c = computeReceipt(input);
+    const msgs = [...issues, ...c.errors.map((e) => errText(e, c))];
+    return { c, msgs };
+  }
+  function updateSummary() {
+    showErrors($('rcErr'), []); // o aviso antigo some assim que algo muda
+    const { c, msgs } = evaluate();
+    const cur = f.currency;
+    const names = Object.fromEntries(S.people.map((p) => [p.id, p.name]));
+    const rows = c.personShares ? order.filter((id) => c.personShares[id] > 0).map((id) => `<div class="kv"><span>${esc(names[id])}</span><b>${fmtIn(c.personShares[id], cur)}</b></div>`).join('') : '';
+    const finalRows = c.consumers && f.currency !== tripCur ? `<p class="hint">Em ${esc(tripCur)}:</p>${c.consumers.map((x) => `<div class="kv"><span>${esc(names[x.personId])}</span><b>${fmt(x.cents)}</b></div>`).join('')}` : '';
+    $('rcSummary').innerHTML = `<h2>Conferência</h2>
+      <div class="kv"><span>Subtotal dos itens</span><b>${fmtIn(c.subtotal, cur)}</b></div>
+      ${c.taxAdded ? `<div class="kv"><span>+ Impostos adicionados</span><b>${fmtIn(c.taxAdded, cur)}</b></div>` : ''}
+      ${c.taxIncluded ? `<div class="kv"><span>Impostos já incluídos (não somam)</span><b>${fmtIn(c.taxIncluded, cur)}</b></div>` : ''}
+      ${c.discount ? `<div class="kv"><span>− Descontos</span><b>${fmtIn(c.discount, cur)}</b></div>` : ''}
+      ${c.tip ? `<div class="kv"><span>+ Gorjeta</span><b>${fmtIn(c.tip, cur)}</b></div>` : ''}
+      <div class="kv"><span>Total calculado</span><b>${fmtIn(c.computedTotal, cur)}</b></div>
+      ${c.diff === null ? '' : `<div class="kv"><span>Diferença para o total da nota</span><b class="${c.diff === 0 ? 'pos' : 'neg'}">${c.diff === 0 ? 'fecha ✔' : fmtIn(c.diff, cur)}</b></div>`}
+      ${rows ? `<h3 class="bulk-day">Por pessoa (rateio proporcional)</h3>${rows}${finalRows}` : ''}
+      ${msgs.length ? `<div class="error"><strong>Para confirmar, falta:</strong><ul>${msgs.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : '<div class="alert ok" style="margin:10px 0 0">Tudo fecha. Pode confirmar.</div>'}`;
+  }
+
+  // eventos
+  const itemIdx = (el) => Number(el.closest('.rc-item')?.dataset.i);
+  const lineIdx = (el) => Number(el.closest('.rc-line')?.dataset.i);
+  form.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button, img');
+    if (!b) return;
+    if (b.hasAttribute('data-view-photo')) { if (photoUrl) showPhotoViewer(photoUrl); return; }
+    if (b.hasAttribute('data-add-item')) { f.items.push({ name: '', qty: '1', price: '', personIds: new Set(), qtyMode: false, qtyBy: {} }); renderItems(); updateSummary(); return; }
+    if (b.hasAttribute('data-add-tax')) { f.taxes.push({ name: '', text: '', included: false }); renderLines(); updateSummary(); return; }
+    if (b.hasAttribute('data-add-disc')) { f.discounts.push({ name: '', text: '' }); renderLines(); updateSummary(); return; }
+    if (b.hasAttribute('data-rm-tax')) { f.taxes.splice(lineIdx(b), 1); renderLines(); updateSummary(); return; }
+    if (b.hasAttribute('data-rm-disc')) { f.discounts.splice(lineIdx(b), 1); renderLines(); updateSummary(); return; }
+    const i = itemIdx(b);
+    if (!Number.isInteger(i)) return;
+    const it = f.items[i];
+    if (b.hasAttribute('data-rm-item')) f.items.splice(i, 1);
+    else if (b.dataset.p) it.personIds.has(b.dataset.p) ? it.personIds.delete(b.dataset.p) : it.personIds.add(b.dataset.p);
+    else if (b.hasAttribute('data-all-p')) order.forEach((id) => it.personIds.add(id));
+    else if (b.hasAttribute('data-qtymode')) it.qtyMode = !it.qtyMode;
+    else return;
+    renderItems(); updateSummary();
+  });
+  form.addEventListener('input', (ev) => {
+    const el = ev.target;
+    const cl = el.classList;
+    if (cl.contains('it-name')) f.items[itemIdx(el)].name = el.value;
+    else if (cl.contains('it-price')) f.items[itemIdx(el)].price = el.value;
+    else if (cl.contains('it-qty')) f.items[itemIdx(el)].qty = el.value;
+    else if (cl.contains('it-qtyby')) f.items[itemIdx(el)].qtyBy[el.dataset.pid] = el.value;
+    else if (cl.contains('tx-name')) f.taxes[lineIdx(el)].name = el.value;
+    else if (cl.contains('tx-val')) f.taxes[lineIdx(el)].text = el.value;
+    else if (cl.contains('ds-name')) f.discounts[lineIdx(el)].name = el.value;
+    else if (cl.contains('ds-val')) f.discounts[lineIdx(el)].text = el.value;
+    else if (el.id === 'rcTip') f.tip = el.value;
+    else if (el.id === 'rcTotal') f.total = el.value;
+    else if (el.id === 'rcConv') f.conv = el.value;
+    else if (el.id === 'rcStore') f.store = el.value;
+    else if (el.id === 'rcDate') f.date = el.value;
+    else return;
+    updateSummary();
+  });
+  form.addEventListener('change', (ev) => {
+    const el = ev.target;
+    if (el.classList.contains('tx-inc')) { f.taxes[lineIdx(el)].included = el.checked; updateSummary(); }
+    else if (el.classList.contains('it-qty')) { renderItems(); updateSummary(); } // a quantidade muda as opções de divisão
+    else if (el.id === 'rcCur') { f.currency = el.value; renderConv(); updateSummary(); }
+    else if (el.id === 'rcCat') f.category = el.value;
+    else if (el.id === 'rcAct') f.activityId = el.value;
+  });
+
+  const toRecord = (status, c, expenseId) => {
+    const { input } = buildInput();
+    return {
+      ...rc, status, store: f.store.trim(), date: /^\d{4}-\d{2}-\d{2}$/.test(f.date) ? f.date : '', currency: f.currency, category: f.category,
+      activityId: f.activityId || null, expenseId, tipCents: input.tipCents, printedTotalCents: input.printedTotalCents, convertedTotalCents: input.convertedTotalCents,
+      items: f.items.map((it, i) => ({
+        id: rc.items[i]?.id ?? uid(), name: it.name.trim(), qty: Number.isInteger(input.items[i].qty) && input.items[i].qty >= 1 ? input.items[i].qty : 1,
+        cents: input.items[i].cents, personIds: order.filter((id) => it.personIds.has(id)),
+        qtyBy: input.items[i].qtyBy && Object.values(input.items[i].qtyBy).every((n) => Number.isInteger(n)) ? input.items[i].qtyBy : null,
+      })),
+      taxes: f.taxes.map((t, i) => ({ name: t.name.trim(), cents: input.taxes[i].cents, included: t.included })),
+      discounts: f.discounts.map((d, i) => ({ name: d.name.trim(), cents: input.discounts[i].cents })),
+    };
+  };
+
+  $('rcDraft')?.addEventListener('click', async () => {
+    const { issues } = buildInput();
+    showErrors($('rcErr'), issues);
+    if (issues.length) return;
+    try {
+      const rec = toRecord('pending', null, null);
+      await db.putReceipt(rec);
+      S.receipts = S.receipts.map((r) => (r.id === rec.id ? rec : r));
+      closeSheet(); render(); toast('Nota salva como pendente (não entra no saldo)');
+    } catch { showErrors($('rcErr'), ['Não foi possível salvar no aparelho.']); }
+  });
+
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const { c, msgs } = evaluate();
+    const errors = [...msgs];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(f.date)) errors.push('Informe a data da nota.');
+    showErrors($('rcErr'), errors);
+    if (errors.length) { $('rcSummary').scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+    const existing = rc.expenseId ? S.expenses.find((x) => x.id === rc.expenseId) : null;
+    const dups = findDuplicates(S.expenses, { date: f.date, cents: c.finalTotal, excludeId: rc.expenseId });
+    if (dups.length) {
+      const ok = await confirmDialog({
+        title: 'Possível nota duplicada',
+        message: `Já ${dups.length === 1 ? 'existe 1 gasto' : `existem ${dups.length} gastos`} em ${formatDateBR(f.date)} no mesmo valor (${fmt(c.finalTotal)}): ${dups.map((x) => `<strong>${esc(x.store || categoryLabel(x.category))}</strong>`).join(', ')}.<br>Lançar mesmo assim?`,
+        okLabel: 'Lançar mesmo assim',
+      });
+      if (!ok) return;
+    }
+    const expenseId = rc.expenseId ?? uid();
+    const receipt = toRecord('confirmed', c, expenseId);
+    const expense = {
+      id: expenseId, date: f.date, cents: c.finalTotal, store: f.store.trim(), category: f.category,
+      description: `Nota fiscal · ${f.items.length} item(ns)${f.currency !== tripCur ? ` · em ${f.currency}` : ''}`, splitMode: 'custom',
+      consumers: c.consumers, createdAt: existing?.createdAt ?? localTimestamp(), activityId: f.activityId || null, receiptId: rc.id,
+    };
+    try {
+      await db.putReceiptAndExpense(receipt, expense); // nota + ÚNICO gasto, juntos
+      S.receipts = S.receipts.map((r) => (r.id === receipt.id ? receipt : r));
+      S.expenses = existing ? S.expenses.map((x) => (x.id === expenseId ? expense : x)) : [...S.expenses, expense];
+      closeSheet(); render(); toast(`Nota lançada: ${fmt(c.finalTotal)}`);
+    } catch { showErrors($('rcErr'), ['Não foi possível salvar no aparelho. Tente de novo.']); }
+  };
+
+  $('rcDel').onclick = async () => {
+    const msg = isConfirmed ? `Remove a nota <strong>e o gasto de ${fmt(S.expenses.find((x) => x.id === rc.expenseId)?.cents ?? 0)}</strong> dela. O valor volta para o saldo.` : 'Remove a nota pendente e a foto dela deste aparelho.';
+    if (!await confirmDialog({ title: 'Excluir nota?', message: msg, okLabel: 'Excluir', danger: true })) return;
+    await db.deleteReceipt(rc.id, rc.expenseId);
+    S.receipts = S.receipts.filter((r) => r.id !== rc.id);
+    S.expenses = S.expenses.filter((x) => x.id !== rc.expenseId);
+    closeSheet(); render(); toast('Nota excluída');
+  };
+
+  renderItems(); renderLines(); renderConv(); updateSummary();
 }
 
 /* ---------- Viagem / pessoas (configuração e primeira execução) ---------- */
@@ -846,6 +1180,7 @@ function renderAjustes() {
       <button class="btn primary" type="submit">Salvar alterações</button></form></div>
     <div class="card"><h2>Backup</h2>
       <p class="hint">Seus dados ficam só neste aparelho. Exporte um backup de vez em quando e guarde em Arquivos/iCloud.</p>
+      <p class="hint"><strong>O backup não inclui as fotos das notas fiscais</strong>, só os dados lançados. As fotos ficam apenas neste aparelho.</p>
       <button class="btn" data-act="export">Exportar backup (.json)</button>
       <button class="btn" data-act="restore">Restaurar backup…</button></div>
     <div class="card"><h2>Sobre</h2>
@@ -869,14 +1204,14 @@ async function exportBackup() {
     const file = new File([text], name, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       await navigator.share({ files: [file], title: name });
-      toast('Backup pronto — salve em Arquivos'); return;
+      toast(S.receipts.some((r) => r.hasPhoto) ? 'Backup pronto (sem as fotos das notas)' : 'Backup pronto — salve em Arquivos'); return;
     }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
   const a = document.createElement('a');
   a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-  toast('Backup exportado');
+  toast(S.receipts.some((r) => r.hasPhoto) ? 'Backup exportado (sem as fotos das notas)' : 'Backup exportado');
 }
 
 async function handleRestoreFile(file) {
@@ -888,10 +1223,12 @@ async function handleRestoreFile(file) {
     return;
   }
   const s = result.summary;
-  const atual = S.trip ? `<p>Dados atuais que serão <strong>apagados</strong>: ${esc(S.trip.name)} — ${S.entries.length} entrada(s), ${S.expenses.length} gasto(s), ${S.activities.length} atividade(s).</p>` : '';
+  const atual = S.trip ? `<p>Dados atuais que serão <strong>apagados</strong>: ${esc(S.trip.name)} — ${S.entries.length} entrada(s), ${S.expenses.length} gasto(s), ${S.activities.length} atividade(s), ${S.receipts.length} nota(s).</p>` : '';
+  const fotos = S.receipts.filter((r) => r.hasPhoto).length;
+  const avisoFotos = `<p>O backup <strong>não inclui fotos</strong>${fotos ? `: as ${fotos} foto(s) de notas guardadas neste aparelho serão apagadas` : ''}.</p>`;
   const ok = await confirmDialog({
     title: 'Restaurar este backup?',
-    message: `${atual}<p>Backup: <strong>${esc(s.tripName)}</strong> (${formatDateBR(s.start)} a ${formatDateBR(s.end)}, ${esc(s.currency)}) — ${s.entries} entrada(s), ${s.expenses} gasto(s), ${s.activities} atividade(s)${s.exportedAt ? `, exportado em ${esc(s.exportedAt.replace('T', ' '))}` : ''}.</p><p>Isso <strong>sobrescreve tudo</strong> o que está no app agora.</p>`,
+    message: `${atual}<p>Backup: <strong>${esc(s.tripName)}</strong> (${formatDateBR(s.start)} a ${formatDateBR(s.end)}, ${esc(s.currency)}) — ${s.entries} entrada(s), ${s.expenses} gasto(s), ${s.activities} atividade(s), ${s.receipts} nota(s)${s.exportedAt ? `, exportado em ${esc(s.exportedAt.replace('T', ' '))}` : ''}.</p><p>Isso <strong>sobrescreve tudo</strong> o que está no app agora.</p>${avisoFotos}`,
     okLabel: 'Sobrescrever e restaurar', danger: true,
   });
   if (!ok) return;
@@ -914,6 +1251,8 @@ document.addEventListener('click', (ev) => {
   else if (act === 'new-activity') openActivitySheet(null);
   else if (act === 'import-schedule') { $('schedPicker').value = ''; $('schedPicker').click(); }
   else if (act === 'paste-schedule') openPasteSheet();
+  else if (act === 'new-note') openNoteSourceSheet();
+  else if (act === 'open-receipt') openReceiptSheet(el.dataset.id);
   else if (act === 'bulk-price') openBulkPriceSheet();
   else if (act === 'set-status') setActivityStatus(el.dataset.id, el.dataset.status);
   else if (act === 'add-activity') openActivitySheet(null, el.dataset.date);
@@ -924,6 +1263,8 @@ document.addEventListener('click', (ev) => {
 });
 $('filePicker').addEventListener('change', (ev) => handleRestoreFile(ev.target.files[0]));
 $('schedPicker').addEventListener('change', (ev) => handleScheduleFile(ev.target.files[0]));
+$('camPicker').addEventListener('change', (ev) => handleNoteFile(ev.target.files[0]));
+$('galPicker').addEventListener('change', (ev) => handleNoteFile(ev.target.files[0]));
 document.addEventListener('visibilitychange', () => {
   // Ao voltar para o app (ex.: virou o dia), atualiza só o Painel e só se não houver formulário aberto.
   if (!document.hidden && S.trip && view === 'painel' && !sheetOpen()) render();

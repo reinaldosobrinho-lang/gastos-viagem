@@ -203,3 +203,15 @@ textarea { min-height: 84px; padding: 10px 12px; resize: vertical; line-height: 
 .bulk-day { margin: 16px 0 2px; font-size: 14px; color: var(--muted); font-weight: 600; }
 .brow { padding: 8px 0 10px; border-bottom: 1px solid var(--line); }
 .brow .t { font-weight: 600; } .brow input { margin-top: 6px; }
+
+.pend { border-color: var(--warn); }
+.rc-item { border: 1px solid var(--line); border-radius: 12px; padding: 4px 12px 12px; margin: 10px 0; background: var(--bg); }
+.rc-item .chip { min-height: 44px; }
+.rc-line { padding: 6px 0 10px; border-bottom: 1px solid var(--line); }
+.rc-line input[type=text], .rc-line .two input { margin-top: 0; }
+label.check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 15px; margin: 6px 0; }
+label.check input { width: 22px; min-height: 22px; height: 22px; margin: 0; }
+.rc-thumb { display: block; max-width: 100%; max-height: 180px; border-radius: 10px; border: 1px solid var(--line); margin: 6px auto; cursor: zoom-in; }
+.viewer { width: 100%; height: 100%; padding: calc(var(--sat) + 10px) 12px calc(var(--sab) + 10px); display: flex; flex-direction: column; }
+.vscroll { overflow: auto; -webkit-overflow-scrolling: touch; flex: 1; background: #000; border-radius: 10px; }
+.vscroll img { display: block; width: 100%; height: auto; }

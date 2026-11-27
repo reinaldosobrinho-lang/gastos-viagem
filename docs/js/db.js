@@ -1,7 +1,7 @@
 // IndexedDB com migrações versionadas. Para mudar o formato: aumente DB_VERSION e
 // acrescente MIGRATIONS[n]. Migrações só ADICIONAM/transformam; nunca apagam dados do usuário.
 export const DB_NAME = 'gastos-viagem';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 const MIGRATIONS = {
   1(db) {
@@ -11,6 +11,10 @@ const MIGRATIONS = {
   },
   2(db) { // Fase 2: cronograma. Só ADICIONA um store; gastos e entradas continuam como estão.
     db.createObjectStore('activities', { keyPath: 'id' }).createIndex('date', 'date');
+  },
+  3(db) { // Fase 3: notas fiscais (dados) e fotos (separadas, fora do backup). Só ADICIONA stores.
+    db.createObjectStore('receipts', { keyPath: 'id' });
+    db.createObjectStore('receiptPhotos', { keyPath: 'id' });
   },
 };
 
@@ -49,14 +53,14 @@ async function write(stores, fn) {
 export async function loadAll() {
   const d = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = d.transaction(['meta', 'entries', 'expenses', 'activities'], 'readonly');
+    const tx = d.transaction(['meta', 'entries', 'expenses', 'activities', 'receipts'], 'readonly');
     const r = {};
-    for (const s of ['meta', 'entries', 'expenses', 'activities']) {
+    for (const s of ['meta', 'entries', 'expenses', 'activities', 'receipts']) {
       tx.objectStore(s).getAll().onsuccess = (e) => { r[s] = e.target.result; };
     }
     tx.oncomplete = () => {
       const m = Object.fromEntries(r.meta.map((x) => [x.key, x.value]));
-      resolve({ trip: m.trip ?? null, people: m.people ?? [], entries: r.entries, expenses: r.expenses, activities: r.activities });
+      resolve({ trip: m.trip ?? null, people: m.people ?? [], entries: r.entries, expenses: r.expenses, activities: r.activities, receipts: r.receipts });
     };
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Leitura cancelada.'));
@@ -84,17 +88,42 @@ export const deleteActivity = (id, unlinkedExpenses) => write(['activities', 'ex
   unlinkedExpenses.forEach((x) => ex.put(x));
 });
 
+export const putReceipt = (r) => write(['receipts'], (tx) => tx.objectStore('receipts').put(r));
+/** Confirma uma nota: grava a nota e o ÚNICO gasto dela na mesma transação. */
+export const putReceiptAndExpense = (receipt, expense) => write(['receipts', 'expenses'], (tx) => {
+  tx.objectStore('receipts').put(receipt);
+  tx.objectStore('expenses').put(expense);
+});
+/** Exclui a nota, a foto e (se houver) o gasto dela, juntos. */
+export const deleteReceipt = (id, expenseId) => write(['receipts', 'receiptPhotos', 'expenses'], (tx) => {
+  tx.objectStore('receipts').delete(id);
+  tx.objectStore('receiptPhotos').delete(id);
+  if (expenseId) tx.objectStore('expenses').delete(expenseId);
+});
+export const putPhoto = (photo) => write(['receiptPhotos'], (tx) => tx.objectStore('receiptPhotos').put(photo));
+export async function getPhoto(id) {
+  const d = await openDB();
+  return new Promise((resolve, reject) => {
+    const req = d.transaction('receiptPhotos', 'readonly').objectStore('receiptPhotos').get(id);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 /** Substitui TUDO numa única transação: se algo falhar, nada muda. */
-export const replaceAll = ({ trip, people, entries, expenses, activities }) =>
-  write(['meta', 'entries', 'expenses', 'activities'], (tx) => {
+export const replaceAll = ({ trip, people, entries, expenses, activities, receipts }) =>
+  write(['meta', 'entries', 'expenses', 'activities', 'receipts', 'receiptPhotos'], (tx) => {
     const meta = tx.objectStore('meta');
     const en = tx.objectStore('entries');
     const ex = tx.objectStore('expenses');
     const ac = tx.objectStore('activities');
-    meta.clear(); en.clear(); ex.clear(); ac.clear();
+    const rc = tx.objectStore('receipts');
+    meta.clear(); en.clear(); ex.clear(); ac.clear(); rc.clear();
+    tx.objectStore('receiptPhotos').clear(); // o backup não inclui fotos
     meta.put({ key: 'trip', value: trip });
     meta.put({ key: 'people', value: people });
     entries.forEach((e) => en.put(e));
     expenses.forEach((x) => ex.put(x));
     activities.forEach((a) => ac.put(a));
+    receipts.forEach((r) => rc.put(r));
   });
