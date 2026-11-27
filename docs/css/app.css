@@ -199,3 +199,7 @@ textarea { min-height: 84px; padding: 10px 12px; resize: vertical; line-height: 
   .tl-anim .tl-line { stroke-dasharray: none; stroke-dashoffset: 0; animation: none; }
   .tl-anim .tl-area, .tl-anim .tl-band, .tl-anim .tl-best, .tl-anim .tl-worst, .tl-anim .tl-bar, .tl-pulse-ring { animation: none; }
 }
+
+.bulk-day { margin: 16px 0 2px; font-size: 14px; color: var(--muted); font-weight: 600; }
+.brow { padding: 8px 0 10px; border-bottom: 1px solid var(--line); }
+.brow .t { font-weight: 600; } .brow input { margin-top: 6px; }
