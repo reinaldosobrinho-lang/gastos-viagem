@@ -25,7 +25,8 @@ export function buildBackup({ trip, people, entries, expenses, activities = [] }
       consumers: x.consumers.map((c) => ({ personId: c.personId, cents: c.cents })),
     })),
     activities: activities.map((a) => ({
-      id: a.id, date: a.date, title: a.title, status: a.status, min: a.min, max: a.max,
+      id: a.id, date: a.date, title: a.title, status: a.status, min: a.min ?? null, max: a.max ?? null,
+      icon: a.icon ?? '', notes: a.notes ?? '',
       splitMode: a.splitMode, createdAt: a.createdAt, participants: [...a.participants],
       shares: a.shares.map((s) => ({ personId: s.personId, min: s.min, max: s.max })),
     })),
@@ -113,13 +114,21 @@ export function validateBackup(input) {
     if (typeof a.title !== 'string' || !a.title.trim() || a.title.length > 80) { errors.push(`${label}: título inválido.`); bad = true; }
     if (!ACTIVITY_STATUS.some((s) => s.id === a.status)) { errors.push(`${label}: status inválido.`); bad = true; }
     if (a.splitMode !== 'equal' && a.splitMode !== 'custom') { errors.push(`${label}: modo de divisão inválido.`); bad = true; }
-    if (!isMoney0(a.min) || !isMoney0(a.max)) { errors.push(`${label}: mínimo/máximo inválidos.`); bad = true; }
-    else if (a.min > a.max) { errors.push(`${label}: o mínimo é maior que o máximo.`); bad = true; }
+    const noMin = a.min === null || a.min === undefined;
+    const noMax = a.max === null || a.max === undefined;
+    const unpriced = noMin && noMax; // sem valor previsto ainda
+    if (noMin !== noMax) { errors.push(`${label}: informe mínimo e máximo, ou nenhum dos dois.`); bad = true; }
+    else if (!unpriced && (!isMoney0(a.min) || !isMoney0(a.max))) { errors.push(`${label}: mínimo/máximo inválidos.`); bad = true; }
+    else if (!unpriced && a.min > a.max) { errors.push(`${label}: o mínimo é maior que o máximo.`); bad = true; }
+    if (!isStr(a.icon ?? '', 16) || !isStr(a.notes ?? '', 600)) { errors.push(`${label}: ícone ou observações inválidos.`); bad = true; }
     const participants = [];
     const shares = [];
     if (!Array.isArray(a.participants) || a.participants.length === 0
       || a.participants.some((p, k) => !personIds.has(p) || a.participants.indexOf(p) !== k)) {
       errors.push(`${label}: participantes inválidos.`); bad = true;
+    } else if (unpriced) {
+      participants.push(...a.participants);
+      if (Array.isArray(a.shares) && a.shares.length) { errors.push(`${label}: divisão da previsão sem valor previsto.`); bad = true; }
     } else if (!Array.isArray(a.shares) || a.shares.length !== a.participants.length) {
       errors.push(`${label}: divisão da previsão inválida.`); bad = true;
     } else {
@@ -138,7 +147,8 @@ export function validateBackup(input) {
     if (!bad) {
       activityIds.add(a.id);
       activities.push({
-        id: a.id, date: a.date, title: a.title.trim(), status: a.status, min: a.min, max: a.max,
+        id: a.id, date: a.date, title: a.title.trim(), status: a.status, min: unpriced ? null : a.min, max: unpriced ? null : a.max,
+        icon: a.icon ?? '', notes: a.notes ?? '',
         splitMode: a.splitMode, createdAt: cleanTs(a.createdAt), participants, shares,
       });
     }

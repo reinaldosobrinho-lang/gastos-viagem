@@ -74,6 +74,8 @@ export const deleteEntry = (id) => write(['entries'], (tx) => tx.objectStore('en
 export const putExpense = (x) => write(['expenses'], (tx) => tx.objectStore('expenses').put(x));
 export const deleteExpense = (id) => write(['expenses'], (tx) => tx.objectStore('expenses').delete(id));
 
+/** Grava várias atividades de uma vez (importação), numa única transação. */
+export const putActivities = (list) => write(['activities'], (tx) => list.forEach((a) => tx.objectStore('activities').put(a)));
 export const putActivity = (a) => write(['activities'], (tx) => tx.objectStore('activities').put(a));
 /** Exclui a atividade e, na mesma transação, remove o vínculo dos gastos (que continuam lançados). */
 export const deleteActivity = (id, unlinkedExpenses) => write(['activities', 'expenses'], (tx) => {

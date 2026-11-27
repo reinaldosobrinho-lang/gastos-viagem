@@ -23,10 +23,21 @@ App de controle de gastos de viagem, para uso pessoal no iPhone. Sem backend; os
 Ao publicar uma versão nova, abra o app com internet: aparece a faixa **"Nova versão disponível → Atualizar"**. Os dados não são tocados.
 Para o desenvolvedor: a cada release, aumente `VERSION` em `sw.js` **e** `APP_VERSION` em `js/version.js` (um teste confere). Mudou o formato dos dados? Aumente `DB_VERSION` e adicione a migração em `js/db.js`.
 
+## Importar um cronograma
+Cronograma > **Importar cronograma (.json)**. O arquivo traz as atividades (data, título, ícone, observações; valores são opcionais).
+Só **adiciona**: nada existente é apagado, e atividades com a mesma data e título são ignoradas. Atividades sem valor previsto não entram na previsão até você preencher mínimo e máximo.
+Formato (valores em centavos; `participants` omitido = as 3 pessoas):
+```json
+{ "app": "gastos-viagem", "kind": "cronograma", "schema": 1,
+  "activities": [ { "date": "2026-12-05", "title": "Parque", "icon": "🎢", "notes": "obs", "min": 10000, "max": 30000 } ] }
+```
+**Não publique no repositório um cronograma real** (endereços, reservas): ele é importado pelo app e fica só no aparelho.
+
 ## Backup
 Ajustes → **Exportar backup**: salve o `.json` em Arquivos/iCloud. Restaurar valida o arquivo e pede confirmação antes de sobrescrever. Faça um backup antes e depois da viagem.
 
 ## Testes (no computador)
 - `npm test` — cálculos, divisões, datas, backup e consistência do PWA.
 - `NODE_PATH=$(npm root -g) node tests/e2e-smoke.cjs` — fluxo da Fase 1 no Chromium (precisa do Playwright).
+- `NODE_PATH=$(npm root -g) node tests/e2e-cronograma.cjs` — importação, ícones e linha do tempo (dados fictícios).
 - `NODE_PATH=$(npm root -g) node tests/e2e-fase2.cjs` — Fase 2 e atualização da v1 para a v2 com dados gravados.

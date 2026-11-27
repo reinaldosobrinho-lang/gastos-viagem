@@ -54,7 +54,7 @@ const norm = (s) => s.replace(/\s/g, ' ');
   await page.click('[data-tab=painel]');
   assert.match(await text(), /Saldo disponível\s*US\$ 950,00/, 'dados da v1 preservados após migração');
   await page.click('[data-tab=gastos]'); assert.match(await text(), /Antigo/);
-  await page.click('[data-tab=ajustes]'); assert.match(await text(), /Versão 1\.1\.0/);
+  await page.click('[data-tab=ajustes]'); assert.match(await text(), /Versão \d+\.\d+\.\d+/);
 
   /* ---- 3) cronograma ---- */
   await page.click('[data-tab=crono]');

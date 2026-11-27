@@ -10,7 +10,7 @@ const shares = buildShares({ mode: 'equal', min: 10000, max: 30000, order: IDS, 
 const state = {
   trip: { name: 'V', start: '2026-10-01', end: '2026-10-10', currency: 'USD' }, people,
   entries: [{ id: 'e1', date: '2026-09-20', cents: 100000, description: '', createdAt: '' }],
-  activities: [{ id: 'a1', date: '2026-10-03', title: 'Parque', status: 'planned', min: 10000, max: 30000, splitMode: 'equal', createdAt: '', participants: IDS, shares }],
+  activities: [{ id: 'a1', date: '2026-10-03', title: 'Parque', status: 'planned', min: 10000, max: 30000, splitMode: 'equal', createdAt: '', icon: '🎢', notes: 'obs', participants: IDS, shares }],
   expenses: [
     { id: 'x1', date: '2026-10-03', cents: 5000, store: '', category: 'passeios', description: '', splitMode: 'equal', createdAt: '', activityId: 'a1', consumers: splitEqual(5000, IDS) },
     { id: 'x2', date: '2026-10-04', cents: 700, store: '', category: 'outros', description: '', splitMode: 'equal', createdAt: '', activityId: null, consumers: splitEqual(700, IDS) },
@@ -66,4 +66,31 @@ test('campos desconhecidos em atividades são descartados', () => {
   const r = validateBackup(b);
   assert.ok(r.ok);
   assert.ok(!('segredo' in r.data.activities[0]) && !('extra' in r.data.activities[0].shares[0]));
+});
+
+test('atividade sem valor previsto (min/max nulos) é válida e volta igual', () => {
+  const b = good();
+  b.activities.push({ id: 'a2', date: '2026-10-04', title: 'Sem preço', status: 'planned', min: null, max: null, icon: '🛋️', notes: '', splitMode: 'equal', createdAt: '', participants: ['p1', 'p2', 'p3'], shares: [] });
+  const r = validateBackup(b);
+  assert.ok(r.ok, r.errors.join('|'));
+  const a2 = r.data.activities.find((a) => a.id === 'a2');
+  assert.deepEqual([a2.min, a2.max, a2.shares], [null, null, []]);
+});
+test('sem valor: rejeita só um dos dois, ou divisão preenchida', () => {
+  const mk = (patch) => { const b = good(); b.activities.push({ id: 'a2', date: '2026-10-04', title: 'X', status: 'planned', min: null, max: null, icon: '', notes: '', splitMode: 'equal', createdAt: '', participants: IDS, shares: [], ...patch }); return validateBackup(b); };
+  assert.ok(!mk({ min: 100 }).ok);
+  assert.ok(!mk({ max: 100 }).ok);
+  assert.ok(!mk({ shares: [{ personId: 'p1', min: 0, max: 0 }] }).ok);
+  assert.ok(!mk({ participants: [] }).ok);
+});
+test('backup da v1.1 (sem ícone/observações) restaura com padrões vazios', () => {
+  const b = good(); delete b.activities[0].icon; delete b.activities[0].notes;
+  const r = validateBackup(b);
+  assert.ok(r.ok); assert.deepEqual([r.data.activities[0].icon, r.data.activities[0].notes], ['', '']);
+});
+test('ícone ou observação grandes demais são rejeitados', () => {
+  const b = good(); b.activities[0].icon = 'x'.repeat(17);
+  assert.ok(!validateBackup(b).ok);
+  const c = good(); c.activities[0].notes = 'x'.repeat(601);
+  assert.ok(!validateBackup(c).ok);
 });

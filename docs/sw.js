@@ -1,11 +1,11 @@
 // Service worker: app shell em cache (funciona offline). Dados ficam no IndexedDB e nunca são tocados aqui.
 // A cada nova versão do app: aumente VERSION aqui e em js/version.js.
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const CACHE = `gastos-viagem-${VERSION}`;
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/version.js', './js/constants.js', './js/money.js', './js/dates.js',
-  './js/split.js', './js/trip.js', './js/calc.js', './js/forecast.js', './js/backup.js', './js/db.js',
+  './js/split.js', './js/trip.js', './js/calc.js', './js/forecast.js', './js/timeline.js', './js/chart.js', './js/icons.js', './js/schedule-import.js', './js/backup.js', './js/db.js',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
 ];
 

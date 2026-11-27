@@ -5,6 +5,7 @@
 // - Gasto vinculado a uma atividade reduz o que ainda resta dela (não é contado duas vezes):
 //     restante = max(previsão - já gasto vinculado, 0)   (só para atividade "planejada")
 // - Atividade concluída ou cancelada: nenhuma previsão restante.
+// - Atividade sem valor previsto (min/max nulos): não entra na previsão; é listada em `unpriced`.
 // - Por pessoa, a mesma conta, usando a parte de cada participante e o que ELA consumiu
 //   nos gastos vinculados. Por isso a soma por pessoa pode diferir do restante da atividade
 //   quando o gasto real foi dividido de forma diferente da previsão.
@@ -21,7 +22,8 @@ export function computeForecast({ trip, people, activities, expenses, today, bal
     const spent = sum(linked.map((x) => x.cents));
     const spentBy = {};
     for (const x of linked) for (const c of x.consumers) spentBy[c.personId] = (spentBy[c.personId] ?? 0) + c.cents;
-    const pending = a.status === 'planned';
+    const priced = a.min !== null && a.min !== undefined; // sem valor previsto: fora da previsão
+    const pending = a.status === 'planned' && priced;
     const remBy = {};
     if (pending) {
       for (const s of a.shares) {
@@ -102,6 +104,7 @@ export function computeForecast({ trip, people, activities, expenses, today, bal
   return {
     perActivity: per, days, trip: trp, persons, alerts,
     overdue: overdue.map((a) => a.id),
+    unpriced: activities.filter((a) => a.status === 'planned' && (a.min === null || a.min === undefined)).map((a) => a.id),
     overspent: activities.filter((a) => per[a.id].overspent).map((a) => a.id),
     noForecastDays: days.filter((d) => d.noForecast).map((d) => d.date),
   };

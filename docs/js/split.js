@@ -16,12 +16,15 @@ const isMoney0 = (v) => Number.isSafeInteger(v) && v >= 0;
  * Divide a previsão (mínimo e máximo) de uma atividade entre os participantes.
  * mode: 'equal' | 'custom'; custom: { id: { min, max } } em centavos (ou null se vazio).
  * Retorna { ok:true, shares:[{personId,min,max}] } ou { ok:false, code, personId?, diff? }.
+ * min e max nulos (os dois) = atividade sem valor previsto: shares vazio.
  * Códigos: no_participant, bad_values, min_gt_max, bad_mode, missing_value,
  * person_min_gt_max, sum_min_mismatch, sum_max_mismatch.
  */
 export function buildShares({ mode, min, max, order, selected, custom = {} }) {
   const ids = order.filter((id) => selected.has(id));
   if (ids.length === 0) return { ok: false, code: 'no_participant' };
+  // Sem valor previsto ainda (os dois vazios): a atividade existe, mas não entra na previsão.
+  if (min === null && max === null) return { ok: true, shares: [] };
   if (!isMoney0(min) || !isMoney0(max)) return { ok: false, code: 'bad_values' };
   if (min > max) return { ok: false, code: 'min_gt_max' };
 
