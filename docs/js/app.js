@@ -12,6 +12,7 @@ import { parseScheduleImport } from './schedule-import.js';
 import { applyBulkPrices } from './bulk-price.js';
 import { computeReceipt, findDuplicates } from './receipt.js';
 import { compressImage } from './image.js';
+import { tipOptions, normalizePcts, DEFAULT_TIP_PCTS } from './tip.js';
 import { dashboard } from './calc.js';
 import { buildBackup, validateBackup } from './backup.js';
 import { validateTrip, validatePeopleNames } from './trip.js';
@@ -172,6 +173,7 @@ function renderGastos() {
         <div class="t">${esc(r.store || 'Nota sem loja')}</div>
         <div class="s">${r.date ? formatDateBR(r.date) : 'sem data'} · ${r.items.length} item(ns) · ${r.hasPhoto ? 'com foto' : 'sem foto'}</div></div><span class="badge cancelled">Pendente</span></button>`).join('')}</div>` : '';
   $('app').innerHTML = `<div class="two"><button class="btn primary" data-act="new-expense" style="margin-top:0">+ Novo gasto</button><button class="btn" data-act="new-note" style="margin-top:0">📷 Nota fiscal</button></div>
+    <button class="btn" data-act="tip-calc">🧮 Calcular gorjeta</button>
     ${pendCard}
     ${body || '<p class="muted center" style="margin-top:32px">Nenhum gasto lançado ainda.</p>'}`;
 }
@@ -814,6 +816,105 @@ function openExpenseSheet(id, preset = {}) {
   renderSplit();
 }
 
+/* ---------- Calculadora de gorjeta ---------- */
+const TIP_KEY = 'tipPcts';
+function loadTipPcts() {
+  try { const v = normalizePcts(JSON.parse(localStorage.getItem(TIP_KEY))); if (v) return v; } catch { /* sem armazenamento: usa o padrão */ }
+  return [...DEFAULT_TIP_PCTS];
+}
+function saveTipPcts(p) { try { localStorage.setItem(TIP_KEY, JSON.stringify(p)); } catch { /* ignora */ } }
+
+/**
+ * Monta a calculadora dentro de `root`. actions(sel, ctx) devolve os botões mostrados depois de escolher uma opção:
+ * [{ label, primary?, fn }]. sel = { pct, tipCents, totalCents }; ctx = { billCents, taxCents, base, cur }.
+ */
+function mountTipCalc(root, { cur, bill = '', tax = '', actions }) {
+  const st = { bill, tax, pre: true, sel: null, pcts: loadTipPcts() };
+  root.innerHTML = `<div class="tipcalc">
+    <label>Valor da conta (total que entregaram, com imposto)<input class="tc-bill" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(st.bill)}"></label>
+    <label>Imposto da conta (opcional)<input class="tc-tax" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(st.tax)}"></label>
+    <label class="check"><input type="checkbox" class="tc-pre" checked> Calcular sobre o valor antes do imposto</label>
+    <div class="tc-opts" aria-live="polite"></div>
+    <div class="tc-actions"></div>
+    <details class="tc-edit"><summary>Mudar os percentuais</summary>
+      <div class="three">${st.pcts.map((v, i) => `<label>Opção ${i + 1} (%)<input class="tc-pct" data-i="${i}" inputmode="numeric" value="${v}"></label>`).join('')}</div>
+      <p class="tc-pcterr error" hidden>Use 3 números inteiros de 0 a 100.</p></details>
+    <p class="hint">Nos EUA a gorjeta não é obrigatória; para mesa com garçom é comum de 18% a 20% (18 / 20 / 25 são sugestões). <strong>Confira se a conta já inclui "gratuity" ou "service charge"</strong> (comum para grupos grandes) para não pagar duas vezes.</p></div>`;
+  const q = (c) => root.querySelector(c);
+
+  const compute = () => {
+    const b = parseVal(st.bill, cur); const t = parseVal(st.tax, cur);
+    if (b.bad || t.bad) return { ok: false, code: 'format' };
+    return { ...tipOptions({ billCents: b.cents ?? 0, taxCents: t.cents ?? 0, preTax: st.pre, pcts: st.pcts }), billCents: b.cents ?? 0, taxCents: t.cents ?? 0 };
+  };
+  function render() {
+    const r = compute();
+    const box = q('.tc-opts'); const act = q('.tc-actions');
+    act.innerHTML = '';
+    if (!r.ok) {
+      st.sel = null;
+      box.innerHTML = `<p class="hint">${{ no_bill: 'Digite o valor da conta para ver as opções.', format: 'Valor inválido: use números, por exemplo 87,40.', bad_tax: 'Imposto inválido.', tax_too_high: 'O imposto não pode ser maior ou igual ao valor da conta.' }[r.code] ?? ''}</p>`;
+      return;
+    }
+    if (st.sel !== null && st.sel >= r.options.length) st.sel = null;
+    box.innerHTML = `<p class="hint">Gorjeta sobre ${fmtIn(r.base, cur)}${r.base !== r.billCents ? ' (conta sem o imposto)' : ''}:</p>
+      <div class="tc-grid">${r.options.map((o, i) => `<button type="button" class="tc-opt ${st.sel === i ? 'on' : ''}" data-i="${i}" aria-pressed="${st.sel === i}">
+        <span class="tc-pct-l">${o.pct}%</span><strong>${fmtIn(o.tipCents, cur)}</strong><span class="tc-tot">total ${fmtIn(o.totalCents, cur)}</span></button>`).join('')}</div>`;
+    if (st.sel !== null) {
+      const o = r.options[st.sel];
+      const ctx = { billCents: r.billCents, taxCents: r.taxCents, base: r.base, cur };
+      act.innerHTML = `<p class="tc-pick">Escolhida: <strong>${o.pct}%</strong> = gorjeta <strong>${fmtIn(o.tipCents, cur)}</strong>, você paga <strong>${fmtIn(o.totalCents, cur)}</strong>.</p>`;
+      (actions?.(o, ctx) ?? []).forEach((a, k) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = `btn ${a.primary ? 'primary' : ''}`; b.textContent = a.label;
+        b.onclick = a.fn; act.appendChild(b);
+        if (k === 0) b.dataset.first = '1';
+      });
+    }
+  }
+  root.addEventListener('input', (ev) => {
+    const el = ev.target;
+    if (el.classList.contains('tc-bill')) st.bill = el.value;
+    else if (el.classList.contains('tc-tax')) st.tax = el.value;
+    else if (el.classList.contains('tc-pct')) {
+      const vals = [...root.querySelectorAll('.tc-pct')].map((x) => x.value);
+      const n = normalizePcts(vals);
+      q('.tc-pcterr').hidden = Boolean(n);
+      if (!n) return;
+      st.pcts = n; saveTipPcts(n);
+    } else return;
+    render();
+  });
+  root.addEventListener('change', (ev) => { if (ev.target.classList.contains('tc-pre')) { st.pre = ev.target.checked; render(); } });
+  root.addEventListener('click', (ev) => {
+    const b = ev.target.closest('.tc-opt');
+    if (!b) return;
+    st.sel = Number(b.dataset.i);
+    render();
+  });
+  render();
+}
+
+function openTipSheet() {
+  const body = openSheet('Gorjeta', '<div id="tipRoot"></div>');
+  mountTipCalc(body.querySelector('#tipRoot'), {
+    cur: S.trip.currency,
+    actions: (o, ctx) => [
+      { label: 'Criar nota com esta gorjeta', primary: true, fn: async () => {
+        const r = await createReceipt(null, {
+          tipCents: o.tipCents, printedTotalCents: o.totalCents,
+          taxes: ctx.taxCents ? [{ name: 'Imposto', cents: ctx.taxCents, included: false }] : [],
+        });
+        closeSheet(); render(); openReceiptSheet(r.id);
+      } },
+      { label: 'Copiar o valor da gorjeta', fn: async () => {
+        try { await navigator.clipboard.writeText(formatPlain(o.tipCents, S.trip.currency)); toast(`Copiado: ${formatPlain(o.tipCents, S.trip.currency)}`); }
+        catch { toast('Não foi possível copiar. Digite o valor.'); }
+      } },
+    ],
+  });
+}
+
 /* ---------- Notas fiscais (lançamento manual, foto só como referência) ---------- */
 const fmtIn = (c, cur) => formatMoney(c, cur);
 const parseVal = (text, cur) => {
@@ -833,11 +934,11 @@ function openNoteSourceSheet() {
   body.querySelector('#nNone').onclick = async () => { const r = await createReceipt(null); closeSheet(); render(); openReceiptSheet(r.id); };
 }
 
-async function createReceipt(photo) {
+async function createReceipt(photo, initial = {}) {
   const r = {
     id: uid(), status: 'pending', createdAt: localTimestamp(), store: '', date: todayLocal(), currency: S.trip.currency, category: 'compras',
     activityId: null, expenseId: null, hasPhoto: Boolean(photo), tipCents: null, printedTotalCents: null, convertedTotalCents: null,
-    items: [], taxes: [], discounts: [],
+    items: [], taxes: [], discounts: [], ...initial,
   };
   if (photo) await db.putPhoto({ id: r.id, type: photo.type, bytes: photo.bytes });
   await db.putReceipt(r);
@@ -902,6 +1003,8 @@ function openReceiptSheet(id) {
       <p class="hint">Marque "já incluído no preço" quando o imposto já está dentro do valor dos itens: assim ele não é somado de novo.</p></fieldset>
     <fieldset><legend>Descontos</legend><div id="rcDiscs"></div><button class="btn" type="button" data-add-disc>+ Desconto</button></fieldset>
     <label>Gorjeta (opcional)<input id="rcTip" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(f.tip)}"></label>
+    <button class="link" type="button" id="rcTipCalc">🧮 Calcular gorjeta</button>
+    <div id="rcTipBox" hidden></div>
     <label>Total impresso na nota<input id="rcTotal" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(f.total)}"></label>
     <div id="rcConvBox"></div>
     <div id="rcSummary" class="card" style="margin-top:14px"></div>
@@ -1080,6 +1183,23 @@ function openReceiptSheet(id) {
     };
   };
 
+  $('rcTipCalc').onclick = () => {
+    const box = $('rcTipBox');
+    if (!box.hidden) { box.hidden = true; box.innerHTML = ''; return; }
+    const { c } = evaluate();
+    const billBefore = c.subtotal + c.taxAdded - c.discount; // conta sem gorjeta, a partir dos itens digitados
+    box.hidden = false;
+    mountTipCalc(box, {
+      cur: f.currency,
+      bill: billBefore > 0 ? formatPlain(billBefore, f.currency) : '',
+      tax: c.taxAdded > 0 ? formatPlain(c.taxAdded, f.currency) : '',
+      actions: (o) => [{ label: 'Usar esta gorjeta na nota', primary: true, fn: () => {
+        f.tip = formatPlain(o.tipCents, f.currency); $('rcTip').value = f.tip;
+        box.hidden = true; box.innerHTML = ''; updateSummary(); toast(`Gorjeta ${o.pct}%: ${fmtIn(o.tipCents, f.currency)}`);
+      } }],
+    });
+  };
+
   $('rcDraft')?.addEventListener('click', async () => {
     const { issues } = buildInput();
     showErrors($('rcErr'), issues);
@@ -1252,6 +1372,7 @@ document.addEventListener('click', (ev) => {
   else if (act === 'import-schedule') { $('schedPicker').value = ''; $('schedPicker').click(); }
   else if (act === 'paste-schedule') openPasteSheet();
   else if (act === 'new-note') openNoteSourceSheet();
+  else if (act === 'tip-calc') openTipSheet();
   else if (act === 'open-receipt') openReceiptSheet(el.dataset.id);
   else if (act === 'bulk-price') openBulkPriceSheet();
   else if (act === 'set-status') setActivityStatus(el.dataset.id, el.dataset.status);

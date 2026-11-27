@@ -210,8 +210,21 @@ textarea { min-height: 84px; padding: 10px 12px; resize: vertical; line-height: 
 .rc-line { padding: 6px 0 10px; border-bottom: 1px solid var(--line); }
 .rc-line input[type=text], .rc-line .two input { margin-top: 0; }
 label.check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 15px; margin: 6px 0; }
-label.check input { width: 22px; min-height: 22px; height: 22px; margin: 0; }
+label.check input[type=checkbox] { -webkit-appearance: checkbox; appearance: auto; accent-color: var(--accent); width: 26px; min-height: 26px; height: 26px; margin: 0; padding: 0; border-radius: 6px; flex: none; }
 .rc-thumb { display: block; max-width: 100%; max-height: 180px; border-radius: 10px; border: 1px solid var(--line); margin: 6px auto; cursor: zoom-in; }
 .viewer { width: 100%; height: 100%; padding: calc(var(--sat) + 10px) 12px calc(var(--sab) + 10px); display: flex; flex-direction: column; }
 .vscroll { overflow: auto; -webkit-overflow-scrolling: touch; flex: 1; background: #000; border-radius: 10px; }
 .vscroll img { display: block; width: 100%; height: auto; }
+
+.tipcalc { margin-top: 4px; }
+.tc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0; }
+.tc-opt { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 96px; padding: 8px 4px;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--text); font: inherit; }
+.tc-opt .tc-pct-l { font-size: 20px; font-weight: 700; color: var(--accent); }
+.tc-opt strong { font-size: 17px; } .tc-opt .tc-tot { font-size: 12px; color: var(--muted); }
+.tc-opt.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.tc-opt.on .tc-pct-l, .tc-opt.on .tc-tot { color: var(--accent-text); }
+.tc-pick { margin: 10px 0 0; }
+.tc-edit { margin-top: 12px; } .tc-edit summary { min-height: 44px; display: flex; align-items: center; color: var(--accent); font-weight: 600; }
+.three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+#rcTipBox { border: 1px solid var(--line); border-radius: 12px; padding: 4px 12px 12px; margin: 6px 0; background: var(--bg); }

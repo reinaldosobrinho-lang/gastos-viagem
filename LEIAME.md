@@ -42,12 +42,19 @@ A foto é só referência: **você digita** os itens, impostos, descontos e gorj
 - Moeda da nota diferente da viagem: você informa o valor convertido.
 - Notas **pendentes** ainda não entram no saldo. **O backup não inclui as fotos**, só os dados.
 
+## Calculadora de gorjeta
+Gastos > **🧮 Calcular gorjeta** (e o botão **🧮 Calcular gorjeta** dentro da nota). Digite o valor da conta que entregaram (com imposto) e, se quiser, o imposto: o app mostra 3 opções (padrão **18%, 20% e 25%**) com a gorjeta e o total a pagar.
+Por padrão calcula sobre o valor **antes do imposto**; desmarque para calcular sobre a conta inteira. Os percentuais podem ser mudados em "Mudar os percentuais" (ficam salvos só neste aparelho, fora do backup).
+**Criar nota com esta gorjeta** já abre a nota com a gorjeta, o total e o imposto preenchidos; falta só digitar os itens.
+Não existe percentual obrigatório nos EUA; confira se a conta já tem "gratuity" ou "service charge".
+
 ## Backup
 Ajustes → **Exportar backup**: salve o `.json` em Arquivos/iCloud. Restaurar valida o arquivo e pede confirmação antes de sobrescrever. Faça um backup antes e depois da viagem.
 
 ## Testes (no computador)
 - `npm test` — cálculos, divisões, datas, backup e consistência do PWA.
 - `NODE_PATH=$(npm root -g) node tests/e2e-smoke.cjs` — fluxo da Fase 1 no Chromium (precisa do Playwright).
+- `NODE_PATH=$(npm root -g) node tests/e2e-gorjeta.cjs` — calculadora de gorjeta.
 - `NODE_PATH=$(npm root -g) node tests/e2e-notas.cjs` — notas fiscais (dados fictícios).
 - `NODE_PATH=$(npm root -g) node tests/e2e-valores.cjs` — tela "Definir valores" (dados fictícios).
 - `NODE_PATH=$(npm root -g) node tests/e2e-cronograma.cjs` — importação, ícones e linha do tempo (dados fictícios).
